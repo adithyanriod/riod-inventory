@@ -5,7 +5,7 @@ rules_version = '2';
 //
 // Who can do what:
 //  * Only signed-in @riodlogic.com accounts that the admin has added (users/{uid}.active == true),
-//    plus admin@riodlogic.com, can read or write anything.
+//    plus adithyan@riodlogic.com, can read or write anything.
 //  * Engineers can only change / delete components they own.
 //  * Only the admin can add or remove engineers.
 
@@ -15,7 +15,7 @@ service cloud.firestore {
     function signedIn()   { return request.auth != null && request.auth.token.email != null; }
     function myEmail()    { return request.auth.token.email.lower(); }
     function isCompany()  { return signedIn() && myEmail().matches('^[a-z0-9._%+-]+@riodlogic[.]com$'); }
-    function isAdmin()    { return isCompany() && myEmail() == 'admin@riodlogic.com'; }
+    function isAdmin()    { return isCompany() && myEmail() == 'adithyan@riodlogic.com'; }
     function userPath()   { return /databases/$(database)/documents/users/$(request.auth.uid); }
     function isEngineer() { return isCompany() && exists(userPath()) && get(userPath()).data.active == true; }
     function isMember()   { return isAdmin() || isEngineer(); }

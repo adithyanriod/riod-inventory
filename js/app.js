@@ -101,7 +101,7 @@ async function handleAuth(user) {
     const snap = await getDoc(ref);
     if (snap.exists()) data = snap.data();
     if (isAdmin && !data) {
-      data = { name: 'Admin', email, role: 'admin', active: true, createdAt: serverTimestamp() };
+      data = { name: 'Adithyan', email, role: 'admin', active: true, createdAt: serverTimestamp() };
       await setDoc(ref, data);
     }
   } catch (e) {
@@ -275,7 +275,7 @@ function subscribe() {
     scheduleRender();
   }, onSyncError('activity')));
 
-  if (S.isAdmin) return;
+  // (the admin is also an engineer, so everyone gets request listeners)
 
   let firstIn = true;
   add(onSnapshot(query(collection(db, 'requests'), where('ownerUid', '==', uid)), snap => {
@@ -360,7 +360,7 @@ const NAV = [
   { id: 'vendors', label: 'Vendors', icon: 'store' },
   { id: 'admin', label: 'Manage Engineers', icon: 'users', admin: true },
 ];
-const navVisible = n => !(n.engineer && S.isAdmin) && !(n.admin && !S.isAdmin);
+const navVisible = n => !(n.admin && !S.isAdmin);
 
 function buildNav() {
   $('#nav').innerHTML = NAV.filter(navVisible).map(n => n.sep
@@ -394,7 +394,7 @@ const VIEWS = {
 };
 
 function route() {
-  let v = location.hash.slice(1) || (S.isAdmin ? 'admin' : 'search');
+  let v = location.hash.slice(1) || 'search';
   const def = VIEWS[v];
   if (!def || !navVisible(def)) v = 'search';
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.nav === v));
@@ -458,7 +458,6 @@ function sourceLabel(c) {
 function rowActions(c) {
   const mine = c.ownerUid === myUid();
   const a = [`<button class="btn sm ghost" data-action="details" data-id="${c.id}">Details</button>`];
-  if (S.isAdmin) return a.join('');
   if (mine) {
     if (c.qty > 0) a.push(`<button class="btn sm" data-action="take" data-id="${c.id}">Mark taken</button>`);
     a.push(`<button class="btn sm" data-action="edit" data-id="${c.id}">${c.qty > 0 ? 'Edit' : 'Restock'}</button>`);
@@ -1161,7 +1160,7 @@ async function showDetails(c) {
   const v = c.sourceType === 'vendor' && c.vendorId ? S.vendors.find(x => x.id === c.vendorId) : null;
   const mine = c.ownerUid === myUid();
   const actions = [];
-  if (!S.isAdmin && !mine && c.qty > 0) actions.push({ label: 'Request this part', cls: 'primary', onClick: () => { setTimeout(() => showRequestModal(c)); } });
+  if (!mine && c.qty > 0) actions.push({ label: 'Request this part', cls: 'primary', onClick: () => { setTimeout(() => showRequestModal(c)); } });
   if (mine && c.qty > 0) actions.push({ label: 'Mark taken', onClick: () => { setTimeout(() => showTakeModal(c)); } });
   if (mine) actions.push({ label: 'Edit', onClick: () => { setTimeout(() => showEditModal(c)); } });
   actions.push({ label: 'Close', cls: 'ghost' });
@@ -1225,7 +1224,7 @@ function showRequestModal(c) {
 
 function showTakeModal(c) {
   if (!c) return;
-  const others = S.users.filter(u => u.active && u.role !== 'admin' && u.id !== myUid());
+  const others = S.users.filter(u => u.active && u.id !== myUid());
   openModal({
     title: `Mark taken: ${c.partNumber}`,
     body: `<p class="muted">${esc(c.value)} · ${esc(c.package)} · ${esc(c.description)}</p><p>In stock: <b>${c.qty}</b></p>
@@ -1503,7 +1502,7 @@ function renderAdmin(el) {
     if (!/^[a-z0-9._%+-]+$/.test(local)) { toast('Email has invalid characters.', 'error'); return; }
     if (pass.length < 6) { toast('Password must be at least 6 characters.', 'error'); return; }
     const email = `${local}@${COMPANY_DOMAIN}`;
-    if (email === ADMIN_EMAIL) { toast('That is the admin email.', 'error'); return; }
+    if (email === ADMIN_EMAIL) { toast('That is your own (admin) account.', 'error'); return; }
     const existing = S.users.find(u => (u.email || '').toLowerCase() === email);
     if (existing) {
       if (existing.active) toast(`${email} is already an engineer.`, 'error');

@@ -13,7 +13,7 @@ Electronic component inventory for the Riod Logic R&D team.
 - **Vendors**: the source is *Online* (site name) or a *Vendor*. Saved vendors pop up while you type.
 - **Desktop notifications** when someone adds a component ("Arjun added 100 10k 0603, Resistor 10k 1%"),
   when someone requests your parts, and when your request is answered.
-- **Admin** (`admin@riodlogic.com`) adds and removes engineers.
+- **Admin** (`adithyan@riodlogic.com`) has every engineer feature, plus **Manage Engineers** to add and remove engineers.
 
 ## How it works (and the GitHub question)
 
@@ -33,8 +33,8 @@ live in Firebase.
 1. Go to <https://console.firebase.google.com> → **Add project** → name it e.g. `riod-inventory`
    (Google Analytics is not needed).
 2. **Build → Authentication → Get started → Sign-in method → Email/Password → Enable → Save.**
-3. **Authentication → Users → Add user**: create the admin account **first**:
-   email `admin@riodlogic.com` and a strong password.
+3. **Authentication → Users → Add user**: create your admin account **first**:
+   email `adithyan@riodlogic.com` and a strong password.
 4. **Build → Firestore Database → Create database** → choose a location close to you (e.g. `asia-south1` Mumbai)
    → **Start in production mode**.
 5. **Firestore → Rules** tab → delete everything, paste the contents of [`firestore.rules`](firestore.rules) → **Publish**.
@@ -48,7 +48,7 @@ live in Firebase.
 4. Back in Firebase: **Authentication → Settings → Authorized domains → Add domain** → `<your-github-username>.github.io`.
 
 ### 3. First use
-1. Open the site and sign in as `admin@riodlogic.com`.
+1. Open the site and sign in as `adithyan@riodlogic.com`.
 2. **Manage Engineers → Add engineer**: enter the name and email. The app generates a temporary password.
    Click **Copy details** and send them to the engineer.
 3. Engineers sign in, click **Enable desktop notifications**, and can change their password from the top-right menu.

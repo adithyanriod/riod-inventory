@@ -21,8 +21,9 @@ export const firebaseConfig = {
 // Only emails ending with this domain can sign in.
 export const COMPANY_DOMAIN = "riodlogic.com";
 
-// The admin account (can add / remove engineers).
-export const ADMIN_EMAIL = "admin@riodlogic.com";
+// The admin: works like a normal engineer and can also add / remove engineers.
+// To change the admin, also change the same email in firestore.rules and re-publish the rules.
+export const ADMIN_EMAIL = "adithyan@riodlogic.com";
 
 // Items with quantity below this number (but more than 0) appear in "Low Stock".
 export const LOW_STOCK_THRESHOLD = 3;
