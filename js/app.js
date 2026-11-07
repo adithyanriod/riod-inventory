@@ -1,14 +1,14 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=11';
-import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=11';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=12';
+import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=12';
 const isCompanyEmail = e => COMPANY_DOMAINS.includes(String(e || '').toLowerCase().split('@')[1]);
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=11';
-import * as BOM from './bom.js?v=11';
+} from './util.js?v=12';
+import * as BOM from './bom.js?v=12';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -40,7 +40,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 11;
+const APP_VERSION = 12;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -968,7 +968,11 @@ function renderAdd(el) {
       toast(`Added ${d.qty} × ${d.partNumber}`, 'success');
       route(); // fresh form, keeps last project & source
     } catch (err2) {
-      console.error(err2); toast(err2.message, 'error', 6000);
+      console.error(err2);
+      if (err2.code === 'permission-denied')
+        toast(`Could not save: the database rejected it. The Firestore rules in Firebase are probably an older version
+          (the old rules reject parts with no Value, such as ICs). Ask the admin to publish the latest <b>firestore.rules</b>.`, 'error', 15000, true);
+      else toast(err2.message, 'error', 6000);
     } finally { btn.disabled = false; }
   });
   return null;
@@ -1389,7 +1393,11 @@ function renderImport(el) {
       location.hash = '#my';
     } catch (err) {
       console.error(err);
-      toast('Import failed: ' + err.message, 'error', 8000);
+      if (err.code === 'permission-denied')
+        toast(`Import failed: the database rejected the data. This usually means the Firestore rules in Firebase are an older version
+          (for example, the old rules reject parts with no Value, such as ICs). Ask the admin to publish the latest <b>firestore.rules</b>
+          (Firebase console → Firestore Database → Rules → paste → Publish), then import again.`, 'error', 20000, true);
+      else toast('Import failed: ' + err.message, 'error', 8000);
       delete btn.dataset.busy;
       refreshAll();
     }
