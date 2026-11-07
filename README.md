@@ -54,6 +54,25 @@ live in Firebase.
    Click **Copy details** and send them to the engineer.
 3. Engineers sign in, click **Enable desktop notifications**, and can change their password from the top-right menu.
 
+## Admin password setup (one time, optional)
+
+**Manage Engineers → Set password** lets the admin set a new password for an engineer (generated or custom) and
+copy it to share. Nobody can see an engineer's current password; the admin can only set a new one.
+Changing another user's password has to happen on a server, so this uses a small Cloud Function
+(`functions/index.js`). Until it is deployed, use **Email reset link** instead.
+
+1. Firebase console → bottom-left **Upgrade** → **Blaze (pay as you go)** → add a billing account.
+   Usage at this scale stays inside the free allowance (about ₹0/month). Set a **budget alert** (e.g. ₹100) when asked.
+2. Install **Node.js LTS** from <https://nodejs.org>.
+3. In a terminal, in this project folder:
+   ```
+   npm install -g firebase-tools
+   firebase login
+   cd functions && npm install && cd ..
+   firebase deploy --only functions,firestore:rules
+   ```
+   This also publishes `firestore.rules`, so you don't need to paste them into the console any more.
+
 ## Importing a BOM / Excel file
 
 - Supported formats: `.xlsx`, `.xls`, `.csv`. Use **Download Excel template** on the import page for a sample.

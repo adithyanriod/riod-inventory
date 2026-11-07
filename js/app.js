@@ -1,13 +1,13 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js?v=8';
-import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=8';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=10';
+import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=10';
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=8';
-import * as BOM from './bom.js?v=8';
+} from './util.js?v=10';
+import * as BOM from './bom.js?v=10';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -39,7 +39,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 8;
+const APP_VERSION = 10;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -980,18 +980,41 @@ function renderImport(el) {
     if (!st.rows.length) { mp.innerHTML = '<div class="notice error">This sheet is empty.</div>'; return; }
     const opts = (sel, filter) => `<option value="-1">— not in file —</option>` + st.headers.map((h, j) =>
       (filter && !filter(h)) ? '' : `<option value="${j}" ${sel === j ? 'selected' : ''}>${esc(h || `(column ${j + 1})`)}</option>`).join('');
-    mp.innerHTML = `<div class="card">
-      <h3>Column mapping</h3>
-      <p class="muted small">Detected automatically from your header row. Change anything that is wrong.<br>
-        <b>Values are read from the Description automatically</b> (10k, 100nF, 4.7uH, 16MHz…), and only for parts where the value matters:
-        resistors, capacitors, inductors, ferrite beads, crystals and fuses. ICs, connectors, diodes and similar parts don't need one.
-        The category is detected from the designator (R, C, L, U…) or the description.</p>
-      <div class="map-grid">
-        <label>Header row<input type="number" id="hdr" min="1" max="${st.rows.length}" value="${st.headerIdx + 1}"></label>
-        ${BOM.FIELDS.map(f => `<label>${esc(f.label)}${f.required ? ' <i>*</i>' : ''}
-          <select data-field="${f.key}" class="${f.required && st.map[f.key] < 0 ? 'missing' : ''}">${opts(st.map[f.key], f.key === 'qty' ? h => BOM.normHeader(h).includes('stock') : null)}</select></label>`).join('')}
+    // First non-empty cell under the header, so you can see what each column holds.
+    const sample = j => {
+      if (j < 0) return '';
+      for (let r = st.headerIdx + 1; r < Math.min(st.rows.length, st.headerIdx + 30); r++) {
+        const v = String(st.rows[r]?.[j] ?? '').trim();
+        if (v) return v;
+      }
+      return '';
+    };
+    const FIELDS = [
+      ['Required', [['partNumber', 'Part Number'], ['description', 'Description'], ['package', 'Package / Size'], ['qty', 'Stock Qty']]],
+      ['Optional', [['value', 'Value', 'Backup only; read from the description'], ['manufacturer', 'Manufacturer'], ['category', 'Category'],
+        ['designator', 'Designator', 'Used to detect the category'], ['source', 'Source', 'Where each part was bought'], ['project', 'Project', 'Overrides the project name']]],
+    ];
+    const found = FIELDS.flatMap(([, fs]) => fs).filter(([k]) => st.map[k] >= 0).length;
+    mp.innerHTML = `<div class="card map-card">
+      <div class="card-head">
+        <div><h3>Columns <span class="muted small">${found} of 10 matched</span></h3>
+          <p class="muted small">Matched automatically from your file's header row. Change any that are wrong.</p></div>
+        <label class="hdr-row">Header row <input type="number" id="hdr" min="1" max="${st.rows.length}" value="${st.headerIdx + 1}"></label>
       </div>
-      ${st.map.qty < 0 ? `<div class="notice error">No <b>Stock Qty</b> column found in this sheet. Add a column named <b>Stock Qty</b> with the quantity you actually have, save the file and upload it again.</div>` : ''}
+      ${st.map.qty < 0 ? `<div class="notice error">No <b>Stock Qty</b> column found. Add a column named <b>Stock Qty</b> with the quantity you have, save the file and upload it again.</div>` : ''}
+      <div class="map-table">
+        <div class="map-row map-headrow"><div>Field</div><div>Column in your file</div><div>Example from your file</div></div>
+        ${FIELDS.map(([group, fs]) => `<div class="map-group">${group}</div>` + fs.map(([k, label, hint]) => {
+          const miss = group === 'Required' && st.map[k] < 0;
+          return `<div class="map-row ${miss ? 'unmatched' : ''}">
+            <div class="map-name">${esc(label)}${group === 'Required' ? ' <i>*</i>' : ''}${hint ? `<span class="muted small">${esc(hint)}</span>` : ''}</div>
+            <div><select data-field="${k}" class="${miss ? 'missing' : ''}">${opts(st.map[k], k === 'qty' ? h => BOM.normHeader(h).includes('stock') : null)}</select></div>
+            <div class="map-sample">${st.map[k] >= 0 ? (esc(sample(st.map[k])) || '<span class="muted">(empty)</span>') : '<span class="muted">—</span>'}</div>
+          </div>`;
+        }).join('')).join('')}
+      </div>
+      <p class="muted small map-note">Values (10k, 100nF, 4.7uH, 16MHz…) are read from the <b>Description</b>. Only resistors, capacitors, inductors,
+        ferrite beads, crystals and fuses need one. The category comes from the designator (R, C, L, U…) or the description.</p>
     </div>`;
     $('#hdr', mp).addEventListener('change', e => {
       const n = Math.max(1, Math.min(st.rows.length, parseInt(e.target.value, 10) || 1));
@@ -1001,7 +1024,7 @@ function renderImport(el) {
   }
 
   const CELLS = [['partNumber', 'Part Number', true], ['category', 'Category'], ['value', 'Value (R/L/C…)'], ['package', 'Package / Size', true],
-    ['description', 'Description', true], ['manufacturer', 'Manufacturer'], ['category', 'Category'], ['qty', 'Stock Qty', true],
+    ['description', 'Description', true], ['manufacturer', 'Manufacturer'], ['qty', 'Stock Qty', true],
     ['sourceName', 'Source (bought from)']];
 
   const cellHtml = (it, i, k) => {
@@ -1626,6 +1649,65 @@ function showVendorModal(v) {
 // ---------------------------------------------------------------------
 //  Admin: manage engineers
 // ---------------------------------------------------------------------
+// Shows login details with a one-click copy, for the admin to share.
+function showCredentials(title, name, email, pass) {
+  const site = location.origin + location.pathname;
+  const text = `Riod Inventory\nWebsite: ${site}\nEmail: ${email}\nPassword: ${pass}`;
+  openModal({
+    title,
+    body: `<p>Share these login details with <b>${esc(name)}</b>:</p>
+      <div class="cred"><div><span>Website</span><b>${esc(site)}</b></div><div><span>Email</span><b>${esc(email)}</b></div><div><span>Password</span><b>${esc(pass)}</b></div></div>
+      <p class="muted small">They can change it later from the menu (top right) → Change password.</p>`,
+    actions: [
+      { label: 'Copy password', onClick: async () => { await copyText(pass); toast('Password copied.', 'success'); return false; } },
+      { label: 'Copy all details', onClick: async () => { await copyText(text); toast('Login details copied.', 'success'); return false; } },
+      { label: 'Done', cls: 'primary' },
+    ],
+  });
+}
+
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); }
+  catch { // older browsers / no permission
+    const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove();
+  }
+}
+
+// Admin sets a new password for an engineer (generated or custom), then copies it to share.
+function showSetPasswordModal(u) {
+  if (!u) return;
+  const m = openModal({
+    title: `Set password: ${u.name}`,
+    body: `<p>Set a new password for <b>${esc(u.name)}</b> (${esc(u.email)}). Their old password stops working, and they are signed out on their devices.</p>
+      <p class="muted small">Nobody, including the admin, can see an engineer's current password. You can only set a new one.</p>
+      <label>New password (min 6 characters)
+        <span class="pass-row"><input name="np" class="mono" autocomplete="off" spellcheck="false" value="${genPass()}"><button class="btn" type="button" data-gen>Generate</button></span></label>
+      <p class="muted small">Keep the generated one, or clear it and type your own.</p>`,
+    actions: [{ label: 'Cancel', cls: 'ghost' }, {
+      label: 'Set password', cls: 'primary', onClick: async el => {
+        const p = el.querySelector('[name=np]').value;
+        if (p.length < 6) { toast('Password must be at least 6 characters.', 'error'); return false; }
+        if (/\s/.test(p) && !await confirmDialog('Spaces in password', 'The password contains spaces. Keep it?', 'Keep')) return false;
+        try {
+          await callFn('adminSetPassword', { uid: u.id, password: p });
+        } catch (e) {
+          console.error(e);
+          const code = String(e.code || '');
+          if (/not-found|internal|unavailable|unimplemented/.test(code) && !/does not exist/.test(e.message || ''))
+            toast('The password service is not set up yet (needs the Cloud Function, see README "Admin password setup"). For now, use "Email reset link".', 'error', 10000);
+          else toast(e.message || 'Could not set the password.', 'error', 7000);
+          return false;
+        }
+        setTimeout(() => showCredentials('Password changed', u.name, u.email, p));
+      },
+    }],
+  });
+  const inp = m.el.querySelector('[name=np]');
+  m.el.querySelector('[data-gen]').onclick = () => { inp.value = genPass(); inp.focus(); inp.select(); };
+  inp.select();
+}
+
 function genPass() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
   const a = crypto.getRandomValues(new Uint32Array(10));
@@ -1634,32 +1716,33 @@ function genPass() {
 
 function renderAdmin(el) {
   el.innerHTML = `
-    <div class="card form">
+    <div class="card add-eng">
       <h3>Add engineer</h3>
-      <form id="addEng" novalidate>
-        <div class="grid">
-          <label>Full name <i>*</i><input name="name" placeholder="e.g. Arjun Menon"></label>
-          <div class="field"><span>Email <i>*</i></span>
-            <span class="seg mail-kind"><label><input type="radio" name="kind" value="company" checked> @${esc(COMPANY_DOMAIN)}</label><label><input type="radio" name="kind" value="other"> Other email</label></span>
-            <span class="email-input"><input name="local" placeholder="name" autocomplete="off" aria-label="Email"><span class="dom">@${esc(COMPANY_DOMAIN)}</span></span></div>
-          <label>Temporary password <i>*</i><input name="pass" value="${genPass()}"></label>
-        </div>
-        <div class="form-actions"><button class="btn primary" type="submit">Add engineer</button></div>
+      <form id="addEng" class="add-eng-row" novalidate>
+        <label>Full name<input name="name" placeholder="e.g. Arjun Menon" autocomplete="off"></label>
+        <label class="ae-email">Email
+          <span class="email-input"><input name="local" placeholder="name" autocomplete="off" aria-label="Email"><select name="domain" aria-label="Email domain">
+            <option value="company" selected>@${esc(COMPANY_DOMAIN)}</option><option value="other">Other email…</option></select></span></label>
+        <label>Temporary password
+          <span class="pass-row"><input name="pass" value="${genPass()}" autocomplete="off"><button class="btn" type="button" data-gen title="Generate a new password">Generate</button></span></label>
+        <button class="btn primary" type="submit">Add engineer</button>
       </form>
-      <p class="muted small">Give the engineer their email and temporary password. They can change it from the menu (top right) after signing in, or use "Forgot password" on the login page.<br>
-        Use <b>Other email</b> for someone outside ${esc(COMPANY_DOMAIN)} (e.g. a contractor's Gmail). Only emails you add here can sign in.</p>
+      <p class="muted small ae-help">After adding, copy the details and send them to the engineer. They can change the password from the top-right menu.
+        Choose <b>Other email…</b> for someone outside ${esc(COMPANY_DOMAIN)}.</p>
     </div>
     <div class="card"><h3>Engineers</h3><div id="results"></div></div>`;
 
   const form = $('#addEng', el);
   const localInp = form.querySelector('[name=local]');
-  const kind = () => form.querySelector('[name=kind]:checked').value;
-  form.querySelectorAll('[name=kind]').forEach(r => r.addEventListener('change', () => {
+  const domSel = form.querySelector('[name=domain]');
+  const kind = () => domSel.value;
+  const syncDomain = () => {
     const other = kind() === 'other';
-    form.querySelector('.dom').classList.toggle('hidden', other);
+    domSel.classList.toggle('other', other);
     localInp.placeholder = other ? 'full email, e.g. someone@gmail.com' : 'name';
-    localInp.focus();
-  }));
+  };
+  domSel.addEventListener('change', () => { syncDomain(); localInp.focus(); });
+  form.querySelector('[data-gen]').addEventListener('click', () => { form.querySelector('[name=pass]').value = genPass(); });
   form.addEventListener('submit', async e => {
     e.preventDefault();
     const name = form.querySelector("[name=name]").value.trim();
@@ -1669,7 +1752,7 @@ function renderAdmin(el) {
     let email;
     if (kind() === 'company') {
       const local = raw.includes('@') ? raw.split('@')[0] : raw;
-      if (raw.includes('@') && !raw.endsWith('@' + COMPANY_DOMAIN)) { toast(`For an outside email, choose "Other email".`, 'error'); return; }
+      if (raw.includes('@') && !raw.endsWith('@' + COMPANY_DOMAIN)) { toast(`For an outside email, pick "Other email…" in the dropdown.`, 'error'); return; }
       if (!/^[a-z0-9._%+-]+$/.test(local)) { toast('Email has invalid characters.', 'error'); return; }
       email = `${local}@${COMPANY_DOMAIN}`;
     } else {
@@ -1692,17 +1775,9 @@ function renderAdmin(el) {
     try {
       const uid = await createAuthUser(email, pass);
       await setDoc(doc(db, 'users', uid), { name, email, role: 'engineer', active: true, createdAt: serverTimestamp(), createdBy: myUid() });
-      openModal({
-        title: 'Engineer added',
-        body: `<p>Send these login details to <b>${esc(name)}</b>:</p>
-          <div class="cred"><div><span>Website</span><b>${esc(location.origin + location.pathname)}</b></div><div><span>Email</span><b>${esc(email)}</b></div><div><span>Temporary password</span><b>${esc(pass)}</b></div></div>`,
-        actions: [{ label: 'Copy details', onClick: async () => {
-          await navigator.clipboard.writeText(`Riod Inventory\nWebsite: ${location.origin + location.pathname}\nEmail: ${email}\nTemporary password: ${pass}`);
-          toast('Copied.', 'success'); return false;
-        } }, { label: 'Done', cls: 'primary' }],
-      });
+      showCredentials('Engineer added', name, email, pass);
       form.reset(); form.querySelector("[name=pass]").value = genPass();
-      form.querySelector('.dom').classList.remove('hidden'); localInp.placeholder = 'name';
+      syncDomain();
     } catch (err) {
       console.error(err);
       if (err.code === 'auth/email-already-in-use')
@@ -1722,7 +1797,7 @@ function renderAdmin(el) {
         <td>${u.active ? '<span class="badge approved">active</span>' : '<span class="badge cancelled">removed</span>'}</td>
         <td class="num">${count(u.id)}</td><td>${esc(fmtDate(u.createdAt))}</td><td>${esc(u.lastLogin ? timeAgo(u.lastLogin) : 'never')}</td>
         <td class="actions">${u.active
-          ? `<button class="btn sm" data-action="resetPass" data-id="${u.id}" title="Email a password reset link">Reset password</button><button class="btn sm danger" data-action="removeEng" data-id="${u.id}">Remove</button>`
+          ? `<button class="btn sm primary" data-action="setPass" data-id="${u.id}" title="Set a new password and copy it to share">Set password</button><button class="btn sm" data-action="resetPass" data-id="${u.id}" title="Email them a link to choose their own password">Email reset link</button><button class="btn sm danger" data-action="removeEng" data-id="${u.id}">Remove</button>`
           : `<button class="btn sm" data-action="reactivateEng" data-id="${u.id}">Reactivate</button>`}</td>
       </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No engineers yet. Add the first one above.</div>';
   };
@@ -1779,6 +1854,7 @@ const ACTIONS = {
     if (!u || !await confirmDialog('Remove engineer', `Remove <b>${esc(u.name)}</b> (${esc(u.email)})?<br>They will no longer be able to sign in. Their components stay in the inventory under their name.`, 'Remove', true)) return;
     try { await updateDoc(doc(db, 'users', id), { active: false, removedAt: serverTimestamp() }); toast(`${u.name} removed.`); } catch (e) { toast(e.message, 'error'); }
   },
+  setPass: id => showSetPasswordModal(S.users.find(x => x.id === id)),
   resetPass: async id => {
     const u = S.users.find(x => x.id === id);
     if (!u) return;

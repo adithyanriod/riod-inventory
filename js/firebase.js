@@ -1,5 +1,5 @@
 // Firebase initialisation (loaded from Google's CDN — no build step needed)
-import { firebaseConfig } from './firebase-config.js?v=8';
+import { firebaseConfig } from './firebase-config.js?v=10';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import * as A from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import * as F from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
@@ -38,4 +38,11 @@ export async function createAuthUser(email, password) {
   const uid = cred.user.uid;
   await A.signOut(secondaryAuth);
   return uid;
+}
+
+// Calls a server function in functions/index.js (loaded only when needed).
+export async function callFn(name, data) {
+  const Fn = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js');
+  const res = await Fn.httpsCallable(Fn.getFunctions(app, 'asia-south1'), name)(data);
+  return res.data;
 }
