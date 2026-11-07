@@ -251,6 +251,7 @@ export function buildItems(rows, headerIdx, map) {
       sourceType: 'online', // decided by the app (it knows the saved vendors)
     };
     const designator = get(r, 'designator');
+    it.designator = designator;
     if (!it.partNumber && !it.value && !it.package && !it.description && !it.qty) continue; // empty row
     if (!it.category) it.category = guessCategory(designator, `${it.description} ${it.value}`);
     it.icType = it.category === 'IC' ? guessIcType(it.description) : '';

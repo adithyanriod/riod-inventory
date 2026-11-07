@@ -228,6 +228,12 @@ select.missing, input.missing { border-color: var(--bad); background: var(--bad-
 .st.ok { color: var(--ok); background: var(--ok-soft); }
 .st.bad { color: var(--bad); background: var(--bad-soft); }
 .st.info { color: var(--info); background: var(--info-soft); }
+.st.warn { color: var(--warn); background: var(--warn-soft); }
+.st-link { border: 0; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.st-link:hover { filter: brightness(.95); text-decoration-style: solid; }
+.tbl tr.current td { background: var(--warn-soft); }
+@keyframes rowflash { 0%, 60% { background: var(--warn-soft); box-shadow: inset 4px 0 0 var(--warn); } 100% { background: transparent; } }
+.tbl.preview tr.flash td { animation: rowflash 2.2s ease-out; }
 
 /* ---------- My inventory ---------- */
 .my-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 16px; align-items: start; }

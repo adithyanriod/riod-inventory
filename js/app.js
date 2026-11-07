@@ -1060,6 +1060,12 @@ function renderImport(el) {
       st.items[Number(e.target.dataset.i)].include = e.target.checked;
       refreshAll();
     });
+    tbody.addEventListener('click', e => {
+      const dup = e.target.closest('[data-dup]');
+      if (dup) { showDuplicates(Number(dup.dataset.dup)); return; }
+      const ex = e.target.closest('[data-exist]');
+      if (ex) showDetails(findComp(ex.dataset.exist));
+    });
     $('#allInc', pv).addEventListener('change', e => {
       st.items.forEach(it => { it.include = e.target.checked; });
       $$('.inc', pv).forEach(c => { c.checked = e.target.checked; });
@@ -1070,18 +1076,61 @@ function renderImport(el) {
     refreshAll();
   }
 
+  // Scrolls the preview to a row and flashes it (turns off "only problems" if that row is hidden).
+  function goToRow(i) {
+    const pv = $('#preview', el);
+    if (st.onlyBad) { st.onlyBad = false; const cb = $('#onlyBad', pv); if (cb) cb.checked = false; refreshAll(); }
+    const tr = $(`tr[data-i="${i}"]`, pv);
+    if (!tr) return;
+    tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    tr.classList.remove('flash'); void tr.offsetWidth; tr.classList.add('flash');
+  }
+
+  // Lists every row in the file that has the same part number (and project) as row i.
+  function showDuplicates(i) {
+    const it = st.items[i];
+    const k = keyOf(it.partNumber, itemProject(it));
+    const idx = st.items.map((x, j) => j).filter(j => {
+      const x = st.items[j];
+      return x.include && !BOM.missingFields(x).length && keyOf(x.partNumber, itemProject(x)) === k;
+    });
+    const total = idx.reduce((s, j) => s + BOM.parseQty(st.items[j].qty), 0);
+    const srcTxt = x => x.sourceName ? `${x.sourceType === 'vendor' ? 'Vendor' : 'Online'} · ${x.sourceName}` : '—';
+    const dm = openModal({
+      title: `Duplicate: ${it.partNumber}`, wide: true,
+      body: `<p>This part number appears in <b>${idx.length} rows</b> of <b>${esc(st.fileName)}</b> (project <b>${esc(itemProject(it))}</b>).
+          They will be imported as <b>one component with ${total.toLocaleString()} pcs</b>, using the details from the first row.
+          To keep a row out, untick it in the preview.</p>
+        <div class="table-wrap"><table class="tbl compact"><thead><tr>
+          <th>Row in file</th><th>Designator</th><th>Value</th><th>Package</th><th>Description</th><th class="num">Stock Qty</th><th>Source</th><th></th></tr></thead>
+        <tbody>${idx.map(j => { const x = st.items[j]; return `<tr class="${j === i ? 'current' : ''}">
+          <td class="strong">${x.rowNo}${j === i ? ' <span class="you">this row</span>' : ''}</td><td>${esc(x.designator || '—')}</td>
+          <td>${esc(x.value || '—')}</td><td>${esc(x.package)}</td><td class="desc">${esc(x.description)}</td>
+          <td class="num">${esc(x.qty)}</td><td>${esc(srcTxt(x))}</td>
+          <td class="actions"><button class="btn sm" type="button" data-goto="${j}">Go to row</button></td></tr>`; }).join('')}</tbody></table></div>`,
+      actions: [{ label: 'Close', cls: 'ghost' }],
+    });
+    dm.el.addEventListener('click', e => {
+      const b = e.target.closest('[data-goto]');
+      if (!b) return;
+      dm.close();
+      goToRow(Number(b.dataset.goto));
+    });
+  }
+
   function itemProject(it) { return String(it.project || '').trim() || projInput.value.trim() || 'General'; }
 
   function refreshAll() {
     const pv = $('#preview', el);
     if (!st.items.length || !$('tbody', pv)) return;
     const mine = new Map(S.components.filter(c => c.ownerUid === myUid()).map(c => [keyOf(c.partNumber, c.project), c]));
-    const keyCount = new Map();
-    for (const it of st.items) {
-      if (!it.include || BOM.missingFields(it).length) continue;
+    const keyRows = new Map(); // key -> indexes of valid rows with that part number + project
+    st.items.forEach((it, i) => {
+      if (!it.include || BOM.missingFields(it).length) return;
       const k = keyOf(it.partNumber, itemProject(it));
-      keyCount.set(k, (keyCount.get(k) || 0) + 1);
-    }
+      if (!keyRows.has(k)) keyRows.set(k, []);
+      keyRows.get(k).push(i);
+    });
     let ready = 0, bad = 0, excluded = 0, pcs = 0;
     st.items.forEach((it, i) => {
       const tr = $(`tr[data-i="${i}"]`, pv);
@@ -1099,10 +1148,14 @@ function renderImport(el) {
         ready++; pcs += BOM.parseQty(it.qty);
         const k = keyOf(it.partNumber, itemProject(it));
         const ex = mine.get(k);
-        const notes = [];
-        if (ex) notes.push(`Adds to your existing stock (${ex.qty} now)`);
-        if ((keyCount.get(k) || 0) > 1) notes.push('Duplicate in file, will be combined');
-        html = notes.length ? `<span class="st info">${esc(notes.join(' · '))}</span>` : '<span class="st ok">Ready</span>';
+        const parts = [];
+        if (ex) parts.push(`<button type="button" class="st info st-link" data-exist="${ex.id}" title="Open the part already in your inventory">Adds to your existing stock (${ex.qty} now)</button>`);
+        const others = (keyRows.get(k) || []).filter(j => j !== i);
+        if (others.length) {
+          const rowsTxt = others.map(j => st.items[j].rowNo).join(', ');
+          parts.push(`<button type="button" class="st warn st-link" data-dup="${i}" title="Show where the duplicates are">Duplicate of row ${rowsTxt}, will be combined</button>`);
+        }
+        html = parts.length ? parts.join(' ') : '<span class="st ok">Ready</span>';
       }
       $('.status', tr).innerHTML = html;
       tr.classList.toggle('row-bad', it.include && miss.length > 0);
