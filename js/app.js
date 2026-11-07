@@ -1,13 +1,13 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js?v=7';
-import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=7';
+import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js?v=8';
+import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=8';
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=7';
-import * as BOM from './bom.js?v=7';
+} from './util.js?v=8';
+import * as BOM from './bom.js?v=8';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -39,7 +39,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 7;
+const APP_VERSION = 8;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -95,11 +95,9 @@ async function handleAuth(user) {
     showLogin();
     return;
   }
+  // Access = @riodlogic.com accounts the admin added, plus any outside email the admin added explicitly.
+  // Either way an active record in "users" (created only by the admin) is required.
   const email = (user.email || '').toLowerCase();
-  if (!email.endsWith('@' + COMPANY_DOMAIN)) {
-    S.loginMsg = `Only @${COMPANY_DOMAIN} email IDs can sign in.`;
-    await signOut(auth); return;
-  }
   const isAdmin = email === ADMIN_EMAIL;
   const ref = doc(db, 'users', user.uid);
   let data;
@@ -115,8 +113,10 @@ async function handleAuth(user) {
     S.loginMsg = 'Could not read your account. Check that the Firestore rules are published (see README).';
     await signOut(auth); return;
   }
-  if (!data || data.active !== true) {
-    S.loginMsg = 'Your account is not active. Please contact the admin.';
+  if (!data || data.active !== true || (data.email || '').toLowerCase() !== email) {
+    S.loginMsg = !data && !email.endsWith('@' + COMPANY_DOMAIN)
+      ? `Only @${COMPANY_DOMAIN} emails, or emails the admin has added, can sign in.`
+      : 'Your account is not active. Please contact the admin.';
     await signOut(auth); return;
   }
   S.profile = { uid: user.uid, email, name: data.name || email.split('@')[0], role: isAdmin ? 'admin' : 'engineer' };
@@ -149,8 +149,8 @@ function wireLogin() {
     e.preventDefault();
     const email = form.email.value.trim().toLowerCase();
     const pass = form.password.value;
-    if (!email.endsWith('@' + COMPANY_DOMAIN)) {
-      msg.textContent = `Only @${COMPANY_DOMAIN} email IDs are allowed.`; msg.className = 'form-msg error'; return;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      msg.textContent = 'Enter your full email address.'; msg.className = 'form-msg error'; return;
     }
     const btn = form.querySelector('button[type=submit]');
     btn.disabled = true; btn.textContent = 'Signing in…';
@@ -161,8 +161,8 @@ function wireLogin() {
   });
   $('#forgot').addEventListener('click', async () => {
     const email = form.email.value.trim().toLowerCase();
-    if (!email.endsWith('@' + COMPANY_DOMAIN)) {
-      msg.textContent = 'Type your @riodlogic.com email above first, then click "Forgot password".';
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      msg.textContent = 'Type your email above first, then click "Forgot password".';
       msg.className = 'form-msg error'; return;
     }
     try {
@@ -1639,29 +1639,46 @@ function renderAdmin(el) {
       <form id="addEng" novalidate>
         <div class="grid">
           <label>Full name <i>*</i><input name="name" placeholder="e.g. Arjun Menon"></label>
-          <label>Company email <i>*</i><span class="email-input"><input name="local" placeholder="name" autocomplete="off"><span>@${esc(COMPANY_DOMAIN)}</span></span></label>
+          <div class="field"><span>Email <i>*</i></span>
+            <span class="seg mail-kind"><label><input type="radio" name="kind" value="company" checked> @${esc(COMPANY_DOMAIN)}</label><label><input type="radio" name="kind" value="other"> Other email</label></span>
+            <span class="email-input"><input name="local" placeholder="name" autocomplete="off" aria-label="Email"><span class="dom">@${esc(COMPANY_DOMAIN)}</span></span></div>
           <label>Temporary password <i>*</i><input name="pass" value="${genPass()}"></label>
         </div>
         <div class="form-actions"><button class="btn primary" type="submit">Add engineer</button></div>
       </form>
-      <p class="muted small">Give the engineer their email and temporary password. They can change it from the menu (top right) after signing in, or use "Forgot password" on the login page.</p>
+      <p class="muted small">Give the engineer their email and temporary password. They can change it from the menu (top right) after signing in, or use "Forgot password" on the login page.<br>
+        Use <b>Other email</b> for someone outside ${esc(COMPANY_DOMAIN)} (e.g. a contractor's Gmail). Only emails you add here can sign in.</p>
     </div>
     <div class="card"><h3>Engineers</h3><div id="results"></div></div>`;
 
   const form = $('#addEng', el);
+  const localInp = form.querySelector('[name=local]');
+  const kind = () => form.querySelector('[name=kind]:checked').value;
+  form.querySelectorAll('[name=kind]').forEach(r => r.addEventListener('change', () => {
+    const other = kind() === 'other';
+    form.querySelector('.dom').classList.toggle('hidden', other);
+    localInp.placeholder = other ? 'full email, e.g. someone@gmail.com' : 'name';
+    localInp.focus();
+  }));
   form.addEventListener('submit', async e => {
     e.preventDefault();
     const name = form.querySelector("[name=name]").value.trim();
-    let local = form.querySelector("[name=local]").value.trim().toLowerCase();
-    if (local.includes('@')) {
-      if (!local.endsWith('@' + COMPANY_DOMAIN)) { toast(`Email must end with @${COMPANY_DOMAIN}`, 'error'); return; }
-      local = local.split('@')[0];
-    }
+    const raw = localInp.value.trim().toLowerCase();
     const pass = form.querySelector("[name=pass]").value;
-    if (!name || !local) { toast('Name and email are required.', 'error'); return; }
-    if (!/^[a-z0-9._%+-]+$/.test(local)) { toast('Email has invalid characters.', 'error'); return; }
+    if (!name || !raw) { toast('Name and email are required.', 'error'); return; }
+    let email;
+    if (kind() === 'company') {
+      const local = raw.includes('@') ? raw.split('@')[0] : raw;
+      if (raw.includes('@') && !raw.endsWith('@' + COMPANY_DOMAIN)) { toast(`For an outside email, choose "Other email".`, 'error'); return; }
+      if (!/^[a-z0-9._%+-]+$/.test(local)) { toast('Email has invalid characters.', 'error'); return; }
+      email = `${local}@${COMPANY_DOMAIN}`;
+    } else {
+      if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(raw)) { toast('Enter a full, valid email address.', 'error'); return; }
+      email = raw;
+      if (!email.endsWith('@' + COMPANY_DOMAIN) && !await confirmDialog('Outside email',
+        `<b>${esc(email)}</b> is not a @${esc(COMPANY_DOMAIN)} address.<br>This person will be able to see and use the whole inventory. Add them?`, 'Add outside user')) return;
+    }
     if (pass.length < 6) { toast('Password must be at least 6 characters.', 'error'); return; }
-    const email = `${local}@${COMPANY_DOMAIN}`;
     if (email === ADMIN_EMAIL) { toast('That is your own (admin) account.', 'error'); return; }
     const existing = S.users.find(u => (u.email || '').toLowerCase() === email);
     if (existing) {
@@ -1685,6 +1702,7 @@ function renderAdmin(el) {
         } }, { label: 'Done', cls: 'primary' }],
       });
       form.reset(); form.querySelector("[name=pass]").value = genPass();
+      form.querySelector('.dom').classList.remove('hidden'); localInp.placeholder = 'name';
     } catch (err) {
       console.error(err);
       if (err.code === 'auth/email-already-in-use')
@@ -1700,7 +1718,7 @@ function renderAdmin(el) {
     $('#results', el).innerHTML = list.length ? `<div class="table-wrap"><table class="tbl"><thead><tr>
       <th>Name</th><th>Email</th><th>Status</th><th class="num">Components</th><th>Added</th><th>Last login</th><th></th></tr></thead>
       <tbody>${list.map(u => `<tr class="${u.active ? '' : 'row-excluded'}">
-        <td class="strong">${esc(u.name)}</td><td>${esc(u.email)}</td>
+        <td class="strong">${esc(u.name)}</td><td>${esc(u.email)}${(u.email || '').toLowerCase().endsWith('@' + COMPANY_DOMAIN) ? '' : ' <span class="tag">outside</span>'}</td>
         <td>${u.active ? '<span class="badge approved">active</span>' : '<span class="badge cancelled">removed</span>'}</td>
         <td class="num">${count(u.id)}</td><td>${esc(fmtDate(u.createdAt))}</td><td>${esc(u.lastLogin ? timeAgo(u.lastLogin) : 'never')}</td>
         <td class="actions">${u.active

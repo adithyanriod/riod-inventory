@@ -2,7 +2,8 @@
 
 Electronic component inventory for the Riod Logic R&D team.
 
-- Sign in with a company email (`name@riodlogic.com`) only. Accounts are created by the admin.
+- Sign in with a company email (`name@riodlogic.com`). Accounts are created by the admin, who can also add
+  people with an outside email (e.g. a contractor). Nobody can sign up on their own.
 - Add components by hand, or import a BOM / Excel file. A preview flags missing fields before anything is saved.
 - Search everything with one box: part number, value (`10k`, `100nF`, `4k7`), size (`0402`, `0603`), description words (`buck`, `LDO`).
   Results show the remaining quantity, the engineer who holds the part, and the project.

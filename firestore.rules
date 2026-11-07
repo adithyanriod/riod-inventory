@@ -4,8 +4,10 @@ rules_version = '2';
 // Paste this into Firebase console -> Firestore Database -> Rules -> Publish.
 //
 // Who can do what:
-//  * Only signed-in @riodlogic.com accounts that the admin has added (users/{uid}.active == true),
-//    plus adithyan@riodlogic.com, can read or write anything.
+//  * Only accounts the admin has added (users/{uid}.active == true, with a matching email) can read or
+//    write anything. These are normally @riodlogic.com emails; the admin may also add outside emails.
+//    Signing up on your own gives no access, because only the admin can create the users/{uid} record.
+//  * adithyan@riodlogic.com is the admin.
 //  * Engineers can only change / delete components they own.
 //  * Only the admin can add or remove engineers.
 
@@ -17,7 +19,11 @@ service cloud.firestore {
     function isCompany()  { return signedIn() && myEmail().matches('^[a-z0-9._%+-]+@riodlogic[.]com$'); }
     function isAdmin()    { return isCompany() && myEmail() == 'adithyan@riodlogic.com'; }
     function userPath()   { return /databases/$(database)/documents/users/$(request.auth.uid); }
-    function isEngineer() { return isCompany() && exists(userPath()) && get(userPath()).data.active == true; }
+    // Any email the admin registered (company or outside). The record's email must match the login,
+    // so nobody can reuse someone else's record.
+    function isEngineer() { return signedIn() && exists(userPath())
+                              && get(userPath()).data.active == true
+                              && get(userPath()).data.email.lower() == myEmail(); }
     function isMember()   { return isAdmin() || isEngineer(); }
     function me()         { return request.auth.uid; }
 
