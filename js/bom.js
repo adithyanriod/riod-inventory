@@ -10,7 +10,7 @@ export const FIELDS = [
     syn: ['partnumber', 'mpn', 'manufacturerpartnumber', 'mfrpartnumber', 'mfrpn', 'mfgpartnumber', 'mfgpn',
           'manufacturerpn', 'partno', 'mfrpartno', 'partnum', 'pn', 'pno', 'libref', 'part'],
     partial: ['partnumber', 'mpn', 'partno'] },
-  { key: 'value', label: 'Value', required: true,
+  { key: 'value', label: 'Value (backup only: values are read from the description)',
     syn: ['value', 'val', 'partvalue', 'comment'], partial: ['value'] },
   { key: 'package', label: 'Package / Size', required: true,
     syn: ['package', 'size', 'footprint', 'packagecase', 'casepackage', 'case', 'packagetype', 'pattern'],
@@ -116,8 +116,8 @@ const PREFIX_CAT = [
   [/^F$/, 'Fuse'], [/^(SW|S)$/, 'Switch'], [/^K$/, 'Relay'], [/^TP$/, 'Test Point'], [/^BT$/, 'Battery'],
 ];
 const WORD_CAT = [
-  [/ferrite/i, 'Ferrite Bead'], [/resistor|\bres\b/i, 'Resistor'], [/capacitor|\bcap\b|mlcc/i, 'Capacitor'],
-  [/inductor/i, 'Inductor'], [/\bled\b/i, 'LED'], [/mosfet|\bfet\b/i, 'MOSFET'], [/transistor|\bbjt\b/i, 'Transistor'],
+  [/ferrite|\bbead\b/i, 'Ferrite Bead'], [/resistor|\bres\b/i, 'Resistor'], [/capacitor|\bcap\b|mlcc/i, 'Capacitor'],
+  [/inductor|\bind\b|\bchoke\b/i, 'Inductor'], [/\bled\b/i, 'LED'], [/mosfet|\bfet\b/i, 'MOSFET'], [/transistor|\bbjt\b/i, 'Transistor'],
   [/diode|schottky|zener|\btvs\b/i, 'Diode'], [/connector|header|\bjst\b|terminal/i, 'Connector'],
   [/crystal|oscillator|\bxtal\b/i, 'Crystal / Oscillator'], [/\bfuse\b|polyfuse/i, 'Fuse'],
   [/switch|button/i, 'Switch'], [/relay/i, 'Relay'], [/sensor/i, 'Sensor'], [/module/i, 'Module'],
@@ -139,8 +139,90 @@ export function guessCategory(designator, description) {
     const p = pre[1].toUpperCase();
     for (const [re, cat] of PREFIX_CAT) if (re.test(p)) return cat;
   }
-  for (const [re, cat] of WORD_CAT) if (re.test(description || '')) return cat;
+  const d = description || '';
+  for (const [re, cat] of WORD_CAT) if (re.test(d)) return cat;
+  // No designator / keyword: recognise passives by the unit in the text ("100nF", "4.7uH", "10kΩ").
+  if (capacitance(d)) return 'Capacitor';
+  if (inductance(d)) return 'Inductor';
+  if (/Ω|[oO][hH][mM]/.test(d) && resistance(d)) return 'Resistor';
   return '';
+}
+
+// ---------------------------------------------------------------------
+//  Component value — only parts whose value matters need one.
+// ---------------------------------------------------------------------
+export const VALUE_CATEGORIES = ['Resistor', 'Capacitor', 'Inductor', 'Ferrite Bead', 'Crystal / Oscillator', 'Fuse'];
+export const needsValue = cat => VALUE_CATEGORIES.includes(String(cat || '').trim());
+
+const fmtNum = s => {
+  const f = parseFloat(String(s).replace(',', '.'));
+  return isNaN(f) ? String(s) : String(+f.toPrecision(6));
+};
+const B = '(?:^|[^\\w.])'; // start boundary that does not split "4.7" or "0603"
+
+// 10k, 4.7k, 4K7, 100R, 0R, 1M, 10mΩ, 120 Ohm, R010 -> "10k", "4.7k", "100Ω", "1M", "10mΩ", "0.01Ω"
+export function resistance(d) {
+  let m = d.match(/(\d+(?:[.,]\d+)?)\s?([kKmMG]?)\s?(?:Ω|[oO][hH][mM][sS]?\b)/);
+  if (m) {
+    const p = m[2] === 'K' ? 'k' : m[2];
+    return p === 'm' ? fmtNum(m[1]) + 'mΩ' : p ? fmtNum(m[1]) + p : fmtNum(m[1]) + 'Ω';
+  }
+  m = d.match(new RegExp(B + '(\\d+(?:[.,]\\d+)?)([kKMR])(\\d*)(?![\\w.%/])'));
+  if (m) {
+    const v = m[3] ? `${m[1]}.${m[3]}` : m[1];
+    const p = m[2] === 'K' ? 'k' : m[2];
+    return p === 'R' ? fmtNum(v) + 'Ω' : fmtNum(v) + p;
+  }
+  m = d.match(new RegExp(B + 'R(\\d+)(?![\\w.])'));
+  if (m) return fmtNum('0.' + m[1]) + 'Ω';
+  return '';
+}
+const pfx = p => (p === 'µ' || p === 'μ' || p === 'U' ? 'u' : p.toLowerCase());
+// 100nF, 0.1uF, 4.7µF, 10PF, 4n7, 2u2 -> "100nF", "0.1uF", "4.7uF", "10pF", "4.7nF", "2.2uF"
+export function capacitance(d) {
+  let m = d.match(/(\d+(?:[.,]\d+)?)\s?([pnuµμPNU])\s?[fF](?![a-zA-Z])/);
+  if (m) return fmtNum(m[1]) + pfx(m[2]) + 'F';
+  m = d.match(new RegExp(B + '(\\d+)([pnuµ])(\\d+)(?![\\w.])'));
+  if (m) return fmtNum(`${m[1]}.${m[3]}`) + pfx(m[2]) + 'F';
+  return '';
+}
+// 4.7uH, 10UH, 100nH, 1mH -> "4.7uH", "10uH", "100nH", "1mH"
+export function inductance(d) {
+  const m = d.match(/(\d+(?:[.,]\d+)?)\s?([nuµμmNU])\s?[hH](?![a-zA-Z])/);
+  return m ? fmtNum(m[1]) + (m[2] === 'm' ? 'm' : pfx(m[2])) + 'H' : '';
+}
+// 16MHz, 32.768kHz, 25 MHZ -> "16MHz", "32.768kHz", "25MHz"
+export function frequency(d) {
+  const m = d.match(/(\d+(?:[.,]\d+)?)\s?([kKMG]?)\s?[hH][zZ]/);
+  return m ? fmtNum(m[1]) + (m[2] === 'K' ? 'k' : m[2]) + 'Hz' : '';
+}
+// 500mA, 2A, 1.5 A -> "500mA", "2A", "1.5A"
+export function current(d) {
+  const m = d.match(/(\d+(?:[.,]\d+)?)\s?(m?)A(?![a-zA-Z])/);
+  return m ? fmtNum(m[1]) + m[2] + 'A' : '';
+}
+
+// Reads the value out of a description, based on what kind of part it is.
+export function extractValue(text, category) {
+  const d = String(text || '');
+  switch (String(category || '').trim()) {
+    case 'Resistor': return resistance(d);
+    case 'Capacitor': return capacitance(d);
+    case 'Inductor': return inductance(d);
+    case 'Ferrite Bead': return resistance(d) || inductance(d);
+    case 'Crystal / Oscillator': return frequency(d);
+    case 'Fuse': return current(d);
+    default: return '';
+  }
+}
+
+// Value for an imported row: from the description first, then from the Value column.
+// Parts that do not need a value (ICs, connectors, diodes, ...) get none.
+export function deriveValue(description, valueColumn, category) {
+  if (needsValue(category)) {
+    return extractValue(description, category) || extractValue(valueColumn, category) || String(valueColumn || '').trim();
+  }
+  return category ? '' : String(valueColumn || '').trim();
 }
 
 export function guessIcType(description) {
@@ -172,6 +254,7 @@ export function buildItems(rows, headerIdx, map) {
     if (!it.partNumber && !it.value && !it.package && !it.description && !it.qty) continue; // empty row
     if (!it.category) it.category = guessCategory(designator, `${it.description} ${it.value}`);
     it.icType = it.category === 'IC' ? guessIcType(it.description) : '';
+    it.value = deriveValue(it.description, it.value, it.category);
     items.push(it);
   }
   return items;
@@ -180,7 +263,7 @@ export function buildItems(rows, headerIdx, map) {
 export function missingFields(it) {
   const m = [];
   if (!String(it.partNumber).trim()) m.push('Part Number');
-  if (!String(it.value).trim()) m.push('Value');
+  if (needsValue(it.category) && !String(it.value).trim()) m.push('Value');
   if (!String(it.package).trim()) m.push('Package');
   if (!String(it.description).trim()) m.push('Description');
   const q = parseQty(it.qty);
@@ -193,7 +276,7 @@ export function downloadTemplate() {
     ['Part Number', 'Value', 'Package', 'Description', 'Manufacturer', 'Category', 'Designator', 'Source', 'Stock Qty'],
     ['RC0603FR-0710KL', '10k', '0603', 'Resistor 10k 1% 1/10W', 'Yageo', 'Resistor', 'R1', 'LCSC', '100'],
     ['CL10B104KB8NNNC', '100nF', '0603', 'Capacitor MLCC 100nF 50V X7R', 'Samsung', 'Capacitor', 'C1', 'Mouser', '200'],
-    ['TPS62130RGTR', 'TPS62130', 'QFN-16', 'Buck converter 3A 17V', 'Texas Instruments', 'IC', 'U1', 'DigiKey', '5'],
+    ['TPS62130RGTR', '', 'QFN-16', 'Buck converter 3A 17V', 'Texas Instruments', 'IC', 'U1', 'DigiKey', '5'],
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [{ wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 34 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 10 }];

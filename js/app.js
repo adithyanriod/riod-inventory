@@ -66,6 +66,7 @@ const findComp = id => S.components.find(c => c.id === id);
 const isLow = c => c.qty > 0 && c.qty < LOW_STOCK_THRESHOLD;
 const isOut = c => c.qty <= 0;
 const qtyClass = q => (q <= 0 ? 'out' : q < LOW_STOCK_THRESHOLD ? 'low' : 'ok');
+const vp = x => [x.value, x.package].filter(Boolean).join(' '); // "10k 0603", or just "QFN-16" for an IC
 const keyOf = (pn, proj) => `${String(pn).trim().toLowerCase()}|${String(proj || '').trim().toLowerCase()}`;
 
 // ---------------------------------------------------------------------
@@ -269,7 +270,7 @@ function subscribe() {
       if (a.byUid === uid) continue;
       const t = toDate(a.createdAt);
       if (!t || t.getTime() < S.loginTime - 5000) continue;
-      if (a.type === 'add') notify('New component added', `${a.byName} added ${a.qty} ${a.value} ${a.package}, ${a.description}`);
+      if (a.type === 'add') notify('New component added', `${a.byName} added ${[a.qty, a.value, a.package].filter(Boolean).join(' ')}, ${a.description}`);
       if (a.type === 'bom') notify('New components added', `${a.byName} added ${a.count} components (${a.totalQty} pcs) from a BOM — project ${a.project}`);
     }
     scheduleRender();
@@ -284,7 +285,7 @@ function subscribe() {
       for (const ch of snap.docChanges()) {
         const r = ch.doc.data();
         if (ch.type === 'added' && r.status === 'pending')
-          notify('Component request', `${r.requesterName} requests ${r.qtyRequested} × ${r.partNumber} (${r.value} ${r.package})`);
+          notify('Component request', `${r.requesterName} requests ${r.qtyRequested} × ${r.partNumber} (${vp(r)})`);
       }
     }
     firstIn = false;
@@ -607,7 +608,7 @@ function activityFeed() {
     const who = `<b>${esc(a.byName)}</b>`;
     const txt = a.type === 'bom'
       ? `${who} imported <b>${a.count}</b> components (${a.totalQty} pcs) into <b>${esc(a.project)}</b>`
-      : `${who} added <b>${a.qty}</b> × ${esc(a.value)} ${esc(a.package)} — ${esc(a.description)} <span class="muted">(${esc(a.partNumber)})</span>`;
+      : `${who} added <b>${a.qty}</b> × ${esc(vp(a))} — ${esc(a.description)} <span class="muted">(${esc(a.partNumber)})</span>`;
     return `<li>${txt}<span class="muted small"> · ${esc(timeAgo(a.createdAt))}</span></li>`;
   }).join('')}</ul></div>`;
 }
@@ -676,7 +677,7 @@ function componentFields(c = {}, editing = false) {
   return `
   <div class="grid">
     <label>Part Number <i>*</i><input name="partNumber" required value="${esc(c.partNumber)}" placeholder="e.g. RC0603FR-0710KL"></label>
-    <label>Value <i>*</i><input name="value" required value="${esc(c.value)}" placeholder="10k, 100nF, 3.3V, STM32F103"></label>
+    <label>Value <i class="val-req ${BOM.needsValue(c.category) ? '' : 'hidden'}">*</i><span class="val-opt opt ${BOM.needsValue(c.category) ? 'hidden' : ''}">(only for R, L, C, crystal, fuse)</span><input name="value" value="${esc(c.value)}" placeholder="10k, 100nF, 4.7uH, 16MHz"></label>
     <label>Package / Size <i>*</i><input name="package" list="dl-packages" required value="${esc(c.package)}" placeholder="0402, 0603, SOT-23, QFN-32"></label>
     <label>Category<select name="category"><option value="">— Select —</option>${CATEGORIES.map(x => `<option ${c.category === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}${c.category && !CATEGORIES.includes(c.category) ? `<option selected>${esc(c.category)}</option>` : ''}</select></label>
     <label class="ic-only ${c.category === 'IC' ? '' : 'hidden'}">IC type<input name="icType" list="dl-ictypes" value="${esc(c.icType)}" placeholder="Buck Converter, LDO, MCU…"></label>
@@ -690,15 +691,26 @@ function componentFields(c = {}, editing = false) {
 function wireComponentForm(form) {
   const cat = form.querySelector('[name=category]');
   const ic = form.querySelector('.ic-only');
-  cat.addEventListener('change', () => ic.classList.toggle('hidden', cat.value !== 'IC'));
   const desc = form.querySelector('[name=description]');
+  const val = form.querySelector('[name=value]');
+  // Value is only needed for parts whose value matters (R, L, C, ...); fill it from the description when possible.
+  const syncValue = () => {
+    const need = BOM.needsValue(cat.value);
+    form.querySelector('.val-req').classList.toggle('hidden', !need);
+    form.querySelector('.val-opt').classList.toggle('hidden', need);
+    val.placeholder = need ? '10k, 100nF, 4.7uH, 16MHz' : 'Not needed for this part';
+    if (need && !val.value.trim()) val.value = BOM.extractValue(desc.value, cat.value);
+  };
+  cat.addEventListener('change', () => { ic.classList.toggle('hidden', cat.value !== 'IC'); syncValue(); });
   desc.addEventListener('blur', () => {
-    if (cat.value) return;
-    const g = BOM.guessCategory('', `${desc.value} ${form.querySelector('[name=value]').value}`);
-    if (g) {
-      cat.value = g; ic.classList.toggle('hidden', g !== 'IC');
-      if (g === 'IC' && !form.querySelector('[name=icType]').value) form.querySelector('[name=icType]').value = BOM.guessIcType(desc.value);
+    if (!cat.value) {
+      const g = BOM.guessCategory('', `${desc.value} ${val.value}`);
+      if (g) {
+        cat.value = g; ic.classList.toggle('hidden', g !== 'IC');
+        if (g === 'IC' && !form.querySelector('[name=icType]').value) form.querySelector('[name=icType]').value = BOM.guessIcType(desc.value);
+      }
     }
+    syncValue();
   });
 }
 
@@ -716,7 +728,7 @@ function readComponentForm(form) {
 function validateComp(d) {
   const miss = [];
   if (!d.partNumber) miss.push('Part Number');
-  if (!d.value) miss.push('Value');
+  if (!d.value && BOM.needsValue(d.category)) miss.push(`Value (needed for a ${d.category.toLowerCase()})`);
   if (!d.package) miss.push('Package / Size');
   if (!d.description) miss.push('Description');
   if (!Number.isInteger(d.qty) || d.qty < 0) miss.push('Quantity (whole number)');
@@ -906,7 +918,8 @@ function renderImport(el) {
     <div class="notice warn">
       <strong>Before you import:</strong> add a separate column named <b>Stock Qty</b> to your Excel / BOM file.
       The stock quantity is read <u>only</u> from the <b>Stock Qty</b> column. The BOM's per-board "Qty" or "Quantity" column is ignored.
-      <br>Mandatory columns: <b>Part Number</b>, <b>Value</b>, <b>Package / Size</b>, <b>Description</b> and <b>Stock Qty</b>.
+      <br>Mandatory columns: <b>Part Number</b>, <b>Package / Size</b>, <b>Description</b> and <b>Stock Qty</b>.
+      The <b>value</b> (10k, 100nF, 4.7uH…) is read from the description, and only resistors, capacitors, inductors, ferrite beads, crystals and fuses need one.
       Optional: Manufacturer, Category, Designator, Project, and <b>Source</b> (where each part was bought: a site like Mouser / LCSC, or a vendor name).
       You can also set or change the source of each part in the preview below.
       <div class="notice-actions"><button class="btn sm" id="tpl" type="button">Download Excel template</button></div>
@@ -964,7 +977,10 @@ function renderImport(el) {
       (filter && !filter(h)) ? '' : `<option value="${j}" ${sel === j ? 'selected' : ''}>${esc(h || `(column ${j + 1})`)}</option>`).join('');
     mp.innerHTML = `<div class="card">
       <h3>Column mapping</h3>
-      <p class="muted small">Detected automatically from your header row. Change anything that is wrong.</p>
+      <p class="muted small">Detected automatically from your header row. Change anything that is wrong.<br>
+        <b>Values are read from the Description automatically</b> (10k, 100nF, 4.7uH, 16MHz…), and only for parts where the value matters:
+        resistors, capacitors, inductors, ferrite beads, crystals and fuses. ICs, connectors, diodes and similar parts don't need one.
+        The category is detected from the designator (R, C, L, U…) or the description.</p>
       <div class="map-grid">
         <label>Header row<input type="number" id="hdr" min="1" max="${st.rows.length}" value="${st.headerIdx + 1}"></label>
         ${BOM.FIELDS.map(f => `<label>${esc(f.label)}${f.required ? ' <i>*</i>' : ''}
@@ -979,7 +995,7 @@ function renderImport(el) {
     $$('select[data-field]', mp).forEach(s => s.addEventListener('change', () => { st.map[s.dataset.field] = Number(s.value); rebuild(); }));
   }
 
-  const CELLS = [['partNumber', 'Part Number', true], ['value', 'Value', true], ['package', 'Package / Size', true],
+  const CELLS = [['partNumber', 'Part Number', true], ['category', 'Category'], ['value', 'Value (R/L/C…)'], ['package', 'Package / Size', true],
     ['description', 'Description', true], ['manufacturer', 'Manufacturer'], ['category', 'Category'], ['qty', 'Stock Qty', true],
     ['sourceName', 'Source (bought from)']];
 
@@ -1000,7 +1016,6 @@ function renderImport(el) {
         <div id="pvSummary" class="summary"></div>
         <div class="pv-tools">
           <label class="chk"><input type="checkbox" id="onlyBad" ${st.onlyBad ? 'checked' : ''}> Show only rows with problems</label>
-          <button class="btn sm ghost" id="fillVal" type="button">Fill empty Value with Part Number</button>
           <button class="btn primary" id="doImport" type="button">Import</button>
         </div>
       </div>
@@ -1021,6 +1036,11 @@ function renderImport(el) {
       const it = st.items[Number(t.dataset.i)];
       it[t.dataset.k] = t.value;
       if (t.dataset.k === 'category') it.icType = t.value.trim() === 'IC' ? BOM.guessIcType(it.description) : '';
+      if ((t.dataset.k === 'category' || t.dataset.k === 'description') && BOM.needsValue(it.category) && !String(it.value).trim()) {
+        it.value = BOM.extractValue(it.description, it.category); // e.g. category changed to Resistor -> read "10k" from description
+        const vInp = $(`input.cell[data-i="${t.dataset.i}"][data-k="value"]`, pv);
+        if (vInp) vInp.value = it.value;
+      }
       if (t.dataset.k === 'sourceName' && it.sourceType !== 'vendor' && isSavedVendor(t.value)) {
         it.sourceType = 'vendor'; // typed a saved vendor's name
         const sel = t.parentElement.querySelector('.src-type');
@@ -1046,18 +1066,6 @@ function renderImport(el) {
       refreshAll();
     });
     $('#onlyBad', pv).addEventListener('change', e => { st.onlyBad = e.target.checked; refreshAll(); });
-    $('#fillVal', pv).addEventListener('click', () => {
-      let n = 0;
-      st.items.forEach((it, i) => {
-        if (!String(it.value).trim() && String(it.partNumber).trim()) {
-          it.value = it.partNumber; n++;
-          const inp = $(`input.cell[data-i="${i}"][data-k="value"]`, pv);
-          if (inp) inp.value = it.value;
-        }
-      });
-      toast(n ? `Filled ${n} empty value(s)` : 'No empty values to fill');
-      refreshAll();
-    });
     $('#doImport', pv).addEventListener('click', doImport);
     refreshAll();
   }
@@ -1080,8 +1088,9 @@ function renderImport(el) {
       const miss = BOM.missingFields(it);
       for (const [k, , req] of CELLS) {
         const inp = $(`input.cell[data-k="${k}"]`, tr);
-        const isMissing = req && (k === 'qty' ? miss.includes('Stock Qty') : !String(it[k]).trim());
+        const isMissing = k === 'qty' ? miss.includes('Stock Qty') : k === 'value' ? miss.includes('Value') : req && !String(it[k]).trim();
         inp.classList.toggle('missing', isMissing);
+        if (k === 'value') inp.placeholder = BOM.needsValue(it.category) ? 'needed' : 'not needed';
       }
       let html;
       if (!it.include) { html = '<span class="st muted">Excluded</span>'; excluded++; }
@@ -1251,7 +1260,7 @@ function showRequestModal(c) {
   if (!c) return;
   openModal({
     title: `Request ${c.partNumber}`,
-    body: `<p class="muted">${esc(c.value)} · ${esc(c.package)} · ${esc(c.description)}</p>
+    body: `<p class="muted">${esc([c.value, c.package, c.description].filter(Boolean).join(' · '))}</p>
       <p>Held by <b>${esc(c.ownerName)}</b> (project <b>${esc(c.project)}</b>). Available now: <b>${c.qty}</b></p>
       <div class="grid">
         <label>Quantity needed <i>*</i><input name="qty" type="number" min="1" max="${c.qty}" value="1"></label>
@@ -1281,7 +1290,7 @@ function showTakeModal(c) {
   const others = S.users.filter(u => u.active && u.id !== myUid());
   openModal({
     title: `Mark taken: ${c.partNumber}`,
-    body: `<p class="muted">${esc(c.value)} · ${esc(c.package)} · ${esc(c.description)}</p><p>In stock: <b>${c.qty}</b></p>
+    body: `<p class="muted">${esc([c.value, c.package, c.description].filter(Boolean).join(' · '))}</p><p>In stock: <b>${c.qty}</b></p>
       <div class="grid">
         <label>Quantity taken <i>*</i><input name="qty" type="number" min="1" max="${c.qty}" value="1"></label>
         <label>Taken by<select name="to"><option value="">Me (${esc(S.profile.name)})</option>${others.map(u => `<option>${esc(u.name)}</option>`).join('')}</select></label>
@@ -1382,7 +1391,7 @@ function renderRequests(el) {
       return `<div class="req card ${r.status}">
         <div class="req-main">
           <div class="req-title"><span class="mono strong">${esc(r.partNumber)}</span> <span class="badge ${r.status}">${esc(r.status)}</span></div>
-          <div class="muted">${esc(r.value)} · ${esc(r.package)} · ${esc(r.description)}</div>
+          <div class="muted">${esc([r.value, r.package, r.description].filter(Boolean).join(' · '))}</div>
           <div>${who} · requested <b>${r.qtyRequested}</b>${r.status === 'approved' ? ` · approved <b>${r.qtyApproved}</b>` : ''}${r.purpose ? ` · for <b>${esc(r.purpose)}</b>` : ''}
             ${st.tab === 'in' && r.status === 'pending' ? ` · you have <b class="${c && c.qty >= r.qtyRequested ? 'text-ok' : 'text-bad'}">${c ? c.qty : 'deleted'}</b>` : ''}</div>
           ${r.note ? `<div class="note">“${esc(r.note)}”</div>` : ''}
@@ -1404,7 +1413,7 @@ function showApproveModal(r) {
   const def = Math.min(r.qtyRequested, c.qty);
   openModal({
     title: 'Approve request',
-    body: `<p><b>${esc(r.requesterName)}</b> requested <b>${r.qtyRequested}</b> × <span class="mono">${esc(r.partNumber)}</span> (${esc(r.value)} ${esc(r.package)}).</p>
+    body: `<p><b>${esc(r.requesterName)}</b> requested <b>${r.qtyRequested}</b> × <span class="mono">${esc(r.partNumber)}</span> (${esc(vp(r))}).</p>
       <p>You have <b>${c.qty}</b> in stock (project ${esc(c.project)}).</p>
       ${r.note ? `<p class="note">“${esc(r.note)}”</p>` : ''}
       <div class="grid">

@@ -23,7 +23,7 @@ service cloud.firestore {
 
     function str(s, max)  { return s is string && s.size() > 0 && s.size() <= max; }
     function validComponent(d) {
-      return str(d.partNumber, 200) && str(d.value, 200) && str(d.package, 200) && str(d.description, 500)
+      return str(d.partNumber, 200) && d.value is string && d.value.size() <= 200 && str(d.package, 200) && str(d.description, 500)
         && d.qty is int && d.qty >= 0 && d.qty <= 100000000
         && d.ownerUid is string;
     }

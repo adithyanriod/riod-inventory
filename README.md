@@ -58,7 +58,11 @@ live in Firebase.
 - Supported formats: `.xlsx`, `.xls`, `.csv`. Use **Download Excel template** on the import page for a sample.
 - **Add a separate column named `Stock Qty`.** The quantity is read **only** from that column.
   The BOM's per-board `Qty` / `Quantity` column is ignored.
-- Mandatory columns: **Part Number, Value, Package/Size, Description, Stock Qty**.
+- Mandatory columns: **Part Number, Package/Size, Description, Stock Qty**.
+- **Value is read from the Description automatically** (`10k`, `4K7`, `100nF`, `4.7uH`, `16MHz`, `500mA`) and is
+  only required for resistors, capacitors, inductors, ferrite beads, crystals and fuses. ICs, connectors, diodes etc.
+  get no value. The category comes from the designator (R, C, L, U, J…) or from words/units in the description.
+  A Value column, if present, is used only when the description has no value.
   Optional: Manufacturer, Category, Designator (used to guess the category), Project, **Source**.
 - **Source is per component.** Add a `Source` (or `Supplier` / `Vendor` / `Site`) column with where each part was
   bought, e.g. `Mouser`, `LCSC`, or a vendor's name. In the preview every row has its own **Online / Vendor** choice
