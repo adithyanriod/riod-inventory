@@ -16,7 +16,7 @@ service cloud.firestore {
 
     function signedIn()   { return request.auth != null && request.auth.token.email != null; }
     function myEmail()    { return request.auth.token.email.lower(); }
-    function isCompany()  { return signedIn() && myEmail().matches('^[a-z0-9._%+-]+@riodlogic[.]com$'); }
+    function isCompany()  { return signedIn() && myEmail().matches('^[a-z0-9._%+-]+@(riodlogic[.]com|riod[.]in)$'); }
     function isAdmin()    { return isCompany() && myEmail() == 'adithyan@riodlogic.com'; }
     function userPath()   { return /databases/$(database)/documents/users/$(request.auth.uid); }
     // Any email the admin registered (company or outside). The record's email must match the login,

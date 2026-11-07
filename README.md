@@ -2,7 +2,7 @@
 
 Electronic component inventory for the Riod Logic R&D team.
 
-- Sign in with a company email (`name@riodlogic.com`). Accounts are created by the admin, who can also add
+- Sign in with a company email (`name@riodlogic.com` or `name@riod.in`). Accounts are created by the admin, who can also add
   people with an outside email (e.g. a contractor). Nobody can sign up on their own.
 - Add components by hand, or import a BOM / Excel file. A preview flags missing fields before anything is saved.
 - Search everything with one box: part number, value (`10k`, `100nF`, `4k7`), size (`0402`, `0603`), description words (`buck`, `LDO`).
@@ -11,7 +11,8 @@ Electronic component inventory for the Riod Logic R&D team.
 - **My Inventory** groups your parts by project.
 - **Requests**: ask a teammate for parts. They approve the quantity, and their stock is deducted automatically.
   Owners can also **Mark taken** to record parts used.
-- **Vendors**: the source is *Online* (site name) or a *Vendor*. Saved vendors pop up while you type.
+- **Vendors**: the source is *Online* (site name) or a *Vendor*. Saved vendors pop up while you type. A vendor can have
+  several contact people (name, optional designation, phone, email): use **+ Add another person**.
 - **Desktop notifications** when someone adds a component ("Arjun added 100 10k 0603, Resistor 10k 1%"),
   when someone requests your parts, and when your request is answered.
 - **Admin** (`adithyan@riodlogic.com`) has every engineer feature, plus **Manage Engineers** to add and remove engineers.
@@ -107,7 +108,7 @@ public, and the data is protected by `firestore.rules` and the logins.
 |---|---|
 | `index.html` | Page shell |
 | `css/styles.css` | Styles (light and dark mode) |
-| `js/firebase-config.js` | **Your Firebase settings, company domain, admin email, low-stock threshold** |
+| `js/firebase-config.js` | **Your Firebase settings, company email domains, admin email, low-stock threshold** |
 | `js/app.js` | Application logic |
 | `js/bom.js` | Excel/BOM parsing and column detection |
 | `firestore.rules` | Database security rules (paste into Firebase) |

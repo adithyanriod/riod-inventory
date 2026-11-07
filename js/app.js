@@ -1,13 +1,14 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=10';
-import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=10';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=11';
+import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=11';
+const isCompanyEmail = e => COMPANY_DOMAINS.includes(String(e || '').toLowerCase().split('@')[1]);
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=10';
-import * as BOM from './bom.js?v=10';
+} from './util.js?v=11';
+import * as BOM from './bom.js?v=11';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -39,7 +40,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -114,8 +115,8 @@ async function handleAuth(user) {
     await signOut(auth); return;
   }
   if (!data || data.active !== true || (data.email || '').toLowerCase() !== email) {
-    S.loginMsg = !data && !email.endsWith('@' + COMPANY_DOMAIN)
-      ? `Only @${COMPANY_DOMAIN} emails, or emails the admin has added, can sign in.`
+    S.loginMsg = !data
+      ? `This email has no account yet. Ask the admin to add you.`
       : 'Your account is not active. Please contact the admin.';
     await signOut(auth); return;
   }
@@ -679,23 +680,29 @@ function renderMy(el) {
 //  Component form (shared by Add and Edit)
 // ---------------------------------------------------------------------
 function componentFields(c = {}, editing = false) {
+  // Fixed 4-column layout. "IC type" takes the Value slot for ICs (ICs don't need a value),
+  // so nothing jumps around when the category changes.
+  const isIC = c.category === 'IC';
+  const need = BOM.needsValue(c.category);
   return `
-  <div class="grid">
-    <label>Part Number <i>*</i><input name="partNumber" required value="${esc(c.partNumber)}" placeholder="e.g. RC0603FR-0710KL"></label>
-    <label>Value <i class="val-req ${BOM.needsValue(c.category) ? '' : 'hidden'}">*</i><span class="val-opt opt ${BOM.needsValue(c.category) ? 'hidden' : ''}">(only for R, L, C, crystal, fuse)</span><input name="value" value="${esc(c.value)}" placeholder="10k, 100nF, 4.7uH, 16MHz"></label>
-    <label>Package / Size <i>*</i><input name="package" list="dl-packages" required value="${esc(c.package)}" placeholder="0402, 0603, SOT-23, QFN-32"></label>
-    <label>Category<select name="category"><option value="">— Select —</option>${CATEGORIES.map(x => `<option ${c.category === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}${c.category && !CATEGORIES.includes(c.category) ? `<option selected>${esc(c.category)}</option>` : ''}</select></label>
-    <label class="ic-only ${c.category === 'IC' ? '' : 'hidden'}">IC type<input name="icType" list="dl-ictypes" value="${esc(c.icType)}" placeholder="Buck Converter, LDO, MCU…"></label>
+  <div class="cf-grid">
+    <label class="span2">Part Number <i>*</i><input name="partNumber" required value="${esc(c.partNumber)}" placeholder="e.g. RC0603FR-0710KL"></label>
     <label>Manufacturer<input name="manufacturer" list="dl-mfrs" value="${esc(c.manufacturer)}" placeholder="TI, Yageo, Murata…"></label>
-    <label class="span2">Description / what part is it <i>*</i><input name="description" required value="${esc(c.description)}" placeholder="e.g. Resistor 10k 1% 1/10W — or — Buck converter 3A 17V input"></label>
-    <label>${editing ? 'Quantity in stock' : 'Quantity'} <i>*</i><input name="qty" type="number" min="0" step="1" required value="${c.qty ?? ''}"></label>
+    <label>Category<select name="category"><option value="">— Select —</option>${CATEGORIES.map(x => `<option ${c.category === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}${c.category && !CATEGORIES.includes(c.category) ? `<option selected>${esc(c.category)}</option>` : ''}</select></label>
+    <label class="span4">Description <i>*</i><input name="description" required value="${esc(c.description)}" placeholder="What part is it, e.g. Resistor 10k 1% 1/10W, or Buck converter 3A 17V input"></label>
+    <label class="val-only ${isIC ? 'hidden' : ''}">Value <i class="val-req ${need ? '' : 'hidden'}">*</i><span class="val-opt opt ${need ? 'hidden' : ''}">(R, L, C only)</span><input name="value" value="${esc(c.value)}" placeholder="10k, 100nF, 4.7uH"></label>
+    <label class="ic-only ${isIC ? '' : 'hidden'}">IC type<input name="icType" list="dl-ictypes" value="${esc(c.icType)}" placeholder="Buck, LDO, MCU…"></label>
+    <label>Package / Size <i>*</i><input name="package" list="dl-packages" required value="${esc(c.package)}" placeholder="0402, 0603, SOT-23"></label>
+    <label>${editing ? 'Qty in stock' : 'Quantity'} <i>*</i><input name="qty" type="number" min="0" step="1" required value="${c.qty ?? ''}" placeholder="0"></label>
     <label>Project<input name="project" list="dl-projects" value="${esc(c.project)}" placeholder="General"></label>
   </div>`;
 }
 
 function wireComponentForm(form) {
   const cat = form.querySelector('[name=category]');
-  const ic = form.querySelector('.ic-only');
+  const icLabel = form.querySelector('.ic-only');
+  const valLabel = form.querySelector('.val-only');
+  const showIc = isIC => { icLabel.classList.toggle('hidden', !isIC); valLabel.classList.toggle('hidden', isIC); };
   const desc = form.querySelector('[name=description]');
   const val = form.querySelector('[name=value]');
   // Value is only needed for parts whose value matters (R, L, C, ...); fill it from the description when possible.
@@ -706,12 +713,12 @@ function wireComponentForm(form) {
     val.placeholder = need ? '10k, 100nF, 4.7uH, 16MHz' : 'Not needed for this part';
     if (need && !val.value.trim()) val.value = BOM.extractValue(desc.value, cat.value);
   };
-  cat.addEventListener('change', () => { ic.classList.toggle('hidden', cat.value !== 'IC'); syncValue(); });
+  cat.addEventListener('change', () => { showIc(cat.value === 'IC'); syncValue(); });
   desc.addEventListener('blur', () => {
     if (!cat.value) {
       const g = BOM.guessCategory('', `${desc.value} ${val.value}`);
       if (g) {
-        cat.value = g; ic.classList.toggle('hidden', g !== 'IC');
+        cat.value = g; showIc(g === 'IC');
         if (g === 'IC' && !form.querySelector('[name=icType]').value) form.querySelector('[name=icType]').value = BOM.guessIcType(desc.value);
       }
     }
@@ -752,6 +759,65 @@ function newComponentDoc(d, src) {
   };
 }
 
+// ---- Vendor contact people (several per vendor) ----
+// Stored as vendor.contacts = [{name, designation, phone, email}]. Older vendors only have
+// contact/phone/email fields; those are read as one person. The first person is also
+// mirrored into contact/phone/email so older views keep working.
+function vendorContacts(v) {
+  if (!v) return [];
+  if (Array.isArray(v.contacts)) return v.contacts;
+  return v.contact || v.phone || v.email ? [{ name: v.contact || '', designation: '', phone: v.phone || '', email: v.email || '' }] : [];
+}
+const contactLine = p => [p.name && (p.designation ? `${p.name} (${p.designation})` : p.name), p.phone, p.email].filter(Boolean).join(' · ');
+const vendorSearchText = v => [v.name, v.notes, ...vendorContacts(v).flatMap(p => [p.name, p.designation, p.phone, p.email])].join(' ').toLowerCase();
+function contactsData(list) {
+  const contacts = list.filter(p => p.name || p.phone || p.email);
+  const first = contacts[0] || {};
+  return { contacts, contact: first.name || '', phone: first.phone || '', email: first.email || '' };
+}
+const sameContacts = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function contactRow(p = {}) {
+  return `<div class="ct-row">
+    <input data-k="name" placeholder="Name" value="${esc(p.name)}" aria-label="Contact name">
+    <input data-k="designation" placeholder="Designation (optional)" value="${esc(p.designation)}" aria-label="Designation">
+    <input data-k="phone" placeholder="Phone" value="${esc(p.phone)}" aria-label="Phone">
+    <input data-k="email" type="email" placeholder="Email" value="${esc(p.email)}" aria-label="Email">
+    <button type="button" class="icon-btn ct-del" title="Remove this person" aria-label="Remove this person">×</button>
+  </div>`;
+}
+function contactsEditor(list) {
+  return `<div class="contacts">
+    <div class="ct-head"><span>Contact people</span></div>
+    <div class="ct-list">${(list.length ? list : [{}]).map(contactRow).join('')}</div>
+    <button type="button" class="btn sm ct-add">+ Add another person</button>
+  </div>`;
+}
+function setContacts(root, list) {
+  root.querySelector('.ct-list').innerHTML = (list.length ? list : [{}]).map(contactRow).join('');
+}
+function wireContacts(root) {
+  const box = root.querySelector('.contacts');
+  if (!box) return;
+  box.addEventListener('click', e => {
+    if (e.target.closest('.ct-add')) {
+      box.querySelector('.ct-list').insertAdjacentHTML('beforeend', contactRow());
+      box.querySelector('.ct-row:last-child input').focus();
+    } else if (e.target.closest('.ct-del')) {
+      const rows = box.querySelectorAll('.ct-row');
+      if (rows.length > 1) e.target.closest('.ct-row').remove();
+      else rows[0].querySelectorAll('input').forEach(i => { i.value = ''; });
+    }
+  });
+}
+function readContacts(root) {
+  return [...root.querySelectorAll('.ct-row')].map(r => {
+    const p = {};
+    r.querySelectorAll('input[data-k]').forEach(i => { p[i.dataset.k] = i.value.trim(); });
+    return p;
+  }).filter(p => p.name || p.phone || p.email || p.designation);
+}
+
 // ---- Source: Online site / Vendor (with autocomplete of saved vendors) ----
 function sourceFields(c = {}) {
   const isV = c.sourceType === 'vendor';
@@ -766,11 +832,9 @@ function sourceFields(c = {}) {
     <div class="src-online ${isV ? 'hidden' : ''}">
       <label>Site name <span class="opt">(optional)</span><input name="site" list="dl-sites" value="${esc(!isV ? c.sourceName || '' : '')}" placeholder="Mouser, DigiKey, LCSC…"></label>
     </div>
-    <div class="src-vendor grid ${isV ? '' : 'hidden'}">
-      <div class="ac"><label>Vendor name <span class="opt">(optional)</span><input name="vendorName" autocomplete="off" value="${esc(isV ? c.sourceName || '' : '')}" placeholder="Start typing to pick a saved vendor"></label><div class="ac-list hidden"></div></div>
-      <label>Contact person<input name="vendorContact" value="${esc(v?.contact)}"></label>
-      <label>Phone<input name="vendorPhone" value="${esc(v?.phone)}"></label>
-      <label>Email<input name="vendorEmail" type="email" value="${esc(v?.email)}"></label>
+    <div class="src-vendor ${isV ? '' : 'hidden'}">
+      <div class="ac src-vname"><label>Vendor name <span class="opt">(optional)</span><input name="vendorName" autocomplete="off" value="${esc(isV ? c.sourceName || '' : '')}" placeholder="Start typing to pick a saved vendor"></label><div class="ac-list hidden"></div></div>
+      ${contactsEditor(vendorContacts(v))}
     </div>
   </fieldset>`;
 }
@@ -783,23 +847,26 @@ function wireSource(root) {
     fs.querySelector('.src-online').classList.toggle('hidden', v !== 'online');
     fs.querySelector('.src-vendor').classList.toggle('hidden', v !== 'vendor');
   }));
+  wireContacts(fs);
   const inp = fs.querySelector('[name=vendorName]');
   const list = fs.querySelector('.ac-list');
   let items = [], active = -1;
   const pick = v => {
     inp.value = v.name;
-    fs.querySelector('[name=vendorContact]').value = v.contact || '';
-    fs.querySelector('[name=vendorPhone]').value = v.phone || '';
-    fs.querySelector('[name=vendorEmail]').value = v.email || '';
+    setContacts(fs, vendorContacts(v));
     fs.dataset.vendorId = v.id;
     list.classList.add('hidden');
   };
   const show = () => {
     const t = inp.value.trim().toLowerCase();
-    items = S.vendors.filter(v => !t || [v.name, v.contact, v.phone, v.email].some(x => String(x || '').toLowerCase().includes(t))).slice(0, 8);
+    items = S.vendors.filter(v => !t || vendorSearchText(v).includes(t)).slice(0, 8);
     active = -1;
     if (!items.length) { list.classList.add('hidden'); return; }
-    list.innerHTML = items.map((v, i) => `<div class="ac-item" data-i="${i}"><strong>${esc(v.name)}</strong><span>${esc([v.contact, v.phone, v.email].filter(Boolean).join(' · ') || 'no contact saved')}</span></div>`).join('');
+    list.innerHTML = items.map((v, i) => {
+      const ps = vendorContacts(v);
+      const sub = ps.length ? contactLine(ps[0]) + (ps.length > 1 ? ` +${ps.length - 1} more` : '') : 'no contact saved';
+      return `<div class="ac-item" data-i="${i}"><strong>${esc(v.name)}</strong><span>${esc(sub)}</span></div>`;
+    }).join('');
     list.classList.remove('hidden');
   };
   inp.addEventListener('input', () => { fs.dataset.vendorId = ''; show(); });
@@ -827,8 +894,7 @@ function readSource(root) {
   const g = k => String(fs.querySelector(`[name=${k}]`)?.value ?? '').trim();
   return {
     type: fs.querySelector('input[name=srcType]:checked')?.value || 'online',
-    site: g('site'), vendorName: g('vendorName'), contact: g('vendorContact'), phone: g('vendorPhone'),
-    email: g('vendorEmail'), vendorId: fs.dataset.vendorId || '',
+    site: g('site'), vendorName: g('vendorName'), contacts: readContacts(fs), vendorId: fs.dataset.vendorId || '',
   };
 }
 
@@ -839,13 +905,13 @@ async function resolveSource(src) {
   let v = (src.vendorId && S.vendors.find(x => x.id === src.vendorId)) ||
     S.vendors.find(x => (x.name || '').toLowerCase() === src.vendorName.toLowerCase());
   if (v) {
-    const patch = {};
-    for (const k of ['contact', 'phone', 'email']) if (src[k] && src[k] !== (v[k] || '')) patch[k] = src[k];
-    if (Object.keys(patch).length) await updateDoc(doc(db, 'vendors', v.id), { ...patch, updatedAt: serverTimestamp() });
+    // Save edited contact people (an emptied list doesn't wipe the saved ones).
+    if (src.contacts.length && !sameContacts(src.contacts, vendorContacts(v)))
+      await updateDoc(doc(db, 'vendors', v.id), { ...contactsData(src.contacts), updatedAt: serverTimestamp() });
     return { sourceType: 'vendor', sourceName: v.name, vendorId: v.id };
   }
   const ref = await addDoc(collection(db, 'vendors'), {
-    name: src.vendorName, contact: src.contact, phone: src.phone, email: src.email, notes: '',
+    name: src.vendorName, ...contactsData(src.contacts), notes: '',
     createdBy: myUid(), createdByName: S.profile.name, createdAt: serverTimestamp(),
   });
   return { sourceType: 'vendor', sourceName: src.vendorName, vendorId: ref.id };
@@ -856,8 +922,8 @@ async function resolveSource(src) {
 // ---------------------------------------------------------------------
 function renderAdd(el) {
   el.innerHTML = `
-    <form id="addForm" class="card form" novalidate>
-      <p class="muted small">Fields marked <i class="req">*</i> are mandatory. Everyone in the team gets a desktop notification when you add a component.</p>
+    <form id="addForm" class="card form add-form" novalidate>
+      <div class="card-head"><h3>Component</h3><span class="muted small"><i>*</i> required · the team gets a desktop notification</span></div>
       ${componentFields({ project: S.ui.lastProject || '' })}
       ${sourceFields({})}
       <div class="form-actions">
@@ -1282,7 +1348,7 @@ function renderImport(el) {
         const k = x.sourceName.toLowerCase();
         if (vendorIds.has(k)) continue;
         const ref = await addDoc(collection(db, 'vendors'), {
-          name: x.sourceName, contact: '', phone: '', email: '', notes: '',
+          name: x.sourceName, contacts: [], contact: '', phone: '', email: '', notes: '',
           createdBy: myUid(), createdByName: S.profile.name, createdAt: serverTimestamp(),
         });
         vendorIds.set(k, { id: ref.id, name: x.sourceName });
@@ -1354,7 +1420,7 @@ async function showDetails(c) {
       ${kv('Package / Size', c.package)}${kv('Category', [c.category, c.icType].filter(Boolean).join(' — '))}
       ${kv('Manufacturer', c.manufacturer)}${kv('Remaining qty', `<span class="qty ${qtyClass(c.qty)}">${c.qty}</span>`, true)}
       ${kv('Held by', c.ownerName)}${kv('Project', c.project)}
-      ${kv('Source', sourceLabel(c))}${v ? kv('Vendor contact', [v.contact, v.phone, v.email].filter(Boolean).join(' · ')) : ''}
+      ${kv('Source', sourceLabel(c))}${v ? kv('Vendor contacts', vendorContacts(v).map(p => esc(contactLine(p))).join('<br>') || '—', true) : ''}
       ${kv('First added', fmtDateTime(c.createdAt))}${kv('Last updated', fmtDateTime(c.updatedAt))}
       <div class="kv span2"><span>Description</span><div>${esc(c.description)}</div></div>
     </div>
@@ -1602,14 +1668,15 @@ function renderVendors(el) {
   $('#addV', el).onclick = () => showVendorModal(null);
   const update = () => {
     const t = st.q.trim().toLowerCase();
-    const list = S.vendors.filter(v => !t || [v.name, v.contact, v.phone, v.email, v.notes].some(x => String(x || '').toLowerCase().includes(t)));
+    const list = S.vendors.filter(v => !t || vendorSearchText(v).includes(t));
     const used = id => S.components.filter(c => c.vendorId === id).length;
-    $('#results', el).innerHTML = list.length ? `<div class="table-wrap"><table class="tbl"><thead><tr>
-        <th>Vendor</th><th>Contact person</th><th>Phone</th><th>Email</th><th>Notes</th><th class="num">Components</th><th>Added by</th><th></th></tr></thead>
+    const person = p => `<div class="ct-person"><b>${esc(p.name || '—')}</b>${p.designation ? ` <span class="muted">${esc(p.designation)}</span>` : ''}
+      ${p.phone ? `<a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>` : ''}${p.email ? `<a href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : ''}</div>`;
+    $('#results', el).innerHTML = list.length ? `<div class="table-wrap"><table class="tbl vendors"><thead><tr>
+        <th>Vendor</th><th>Contact people</th><th>Notes</th><th class="num">Components</th><th>Added by</th><th></th></tr></thead>
       <tbody>${list.map(v => `<tr>
-        <td class="strong">${esc(v.name)}</td><td>${esc(v.contact)}</td>
-        <td>${v.phone ? `<a href="tel:${esc(v.phone)}">${esc(v.phone)}</a>` : ''}</td>
-        <td>${v.email ? `<a href="mailto:${esc(v.email)}">${esc(v.email)}</a>` : ''}</td>
+        <td class="strong">${esc(v.name)}</td>
+        <td>${vendorContacts(v).map(person).join('') || '<span class="muted">—</span>'}</td>
         <td class="desc">${esc(v.notes)}</td><td class="num">${used(v.id)}</td><td>${esc(v.createdByName)}</td>
         <td class="actions"><button class="btn sm" data-action="editVendor" data-id="${v.id}">Edit</button>
           ${v.createdBy === myUid() || S.isAdmin ? `<button class="btn sm ghost" data-action="deleteVendor" data-id="${v.id}">Delete</button>` : ''}</td>
@@ -1625,16 +1692,18 @@ function renderVendors(el) {
 function showVendorModal(v) {
   openModal({
     title: v ? `Edit vendor: ${v.name}` : 'Add vendor',
-    body: `<div class="grid">
+    wide: true,
+    body: `<div class="vendor-form">
       <label>Vendor name <i>*</i><input name="name" value="${esc(v?.name)}"></label>
-      <label>Contact person<input name="contact" value="${esc(v?.contact)}"></label>
-      <label>Phone<input name="phone" value="${esc(v?.phone)}"></label>
-      <label>Email<input name="email" type="email" value="${esc(v?.email)}"></label>
-      <label class="span2">Address / notes<textarea name="notes" rows="2">${esc(v?.notes)}</textarea></label></div>`,
+      ${contactsEditor(vendorContacts(v))}
+      <label>Address / notes <span class="opt">(optional)</span><textarea name="notes" rows="2">${esc(v?.notes)}</textarea></label></div>`,
+    onOpen: m => wireContacts(m),
     actions: [{ label: 'Cancel', cls: 'ghost' }, {
       label: 'Save', cls: 'primary', onClick: async m => {
         const g = k => m.querySelector(`[name=${k}]`).value.trim();
-        const data = { name: g('name'), contact: g('contact'), phone: g('phone'), email: g('email'), notes: g('notes') };
+        const people = readContacts(m);
+        if (people.some(p => !p.name && (p.designation))) { toast('Each contact person needs a name.', 'error'); return false; }
+        const data = { name: g('name'), ...contactsData(people), notes: g('notes') };
         if (!data.name) { toast('Vendor name is required.', 'error'); return false; }
         const dup = S.vendors.find(x => x.name.toLowerCase() === data.name.toLowerCase() && x.id !== v?.id);
         if (dup) { toast('A vendor with this name already exists.', 'error'); return false; }
@@ -1722,13 +1791,13 @@ function renderAdmin(el) {
         <label>Full name<input name="name" placeholder="e.g. Arjun Menon" autocomplete="off"></label>
         <label class="ae-email">Email
           <span class="email-input"><input name="local" placeholder="name" autocomplete="off" aria-label="Email"><select name="domain" aria-label="Email domain">
-            <option value="company" selected>@${esc(COMPANY_DOMAIN)}</option><option value="other">Other email…</option></select></span></label>
+            ${COMPANY_DOMAINS.map((d, i) => `<option value="${esc(d)}" ${i ? '' : 'selected'}>@${esc(d)}</option>`).join('')}<option value="other">Other email…</option></select></span></label>
         <label>Temporary password
           <span class="pass-row"><input name="pass" value="${genPass()}" autocomplete="off"><button class="btn" type="button" data-gen title="Generate a new password">Generate</button></span></label>
         <button class="btn primary" type="submit">Add engineer</button>
       </form>
       <p class="muted small ae-help">After adding, copy the details and send them to the engineer. They can change the password from the top-right menu.
-        Choose <b>Other email…</b> for someone outside ${esc(COMPANY_DOMAIN)}.</p>
+        Choose <b>Other email…</b> for someone outside ${COMPANY_DOMAINS.map(d => '@' + esc(d)).join(' / ')}.</p>
     </div>
     <div class="card"><h3>Engineers</h3><div id="results"></div></div>`;
 
@@ -1750,16 +1819,18 @@ function renderAdmin(el) {
     const pass = form.querySelector("[name=pass]").value;
     if (!name || !raw) { toast('Name and email are required.', 'error'); return; }
     let email;
-    if (kind() === 'company') {
-      const local = raw.includes('@') ? raw.split('@')[0] : raw;
-      if (raw.includes('@') && !raw.endsWith('@' + COMPANY_DOMAIN)) { toast(`For an outside email, pick "Other email…" in the dropdown.`, 'error'); return; }
+    if (kind() !== 'other') {
+      // A full company address typed in the box (e.g. x@riod.in) is fine whichever domain is selected.
+      const typedDom = raw.includes('@') ? raw.split('@')[1] : kind();
+      const local = raw.split('@')[0];
+      if (!COMPANY_DOMAINS.includes(typedDom)) { toast(`For an outside email, pick "Other email…" in the dropdown.`, 'error'); return; }
       if (!/^[a-z0-9._%+-]+$/.test(local)) { toast('Email has invalid characters.', 'error'); return; }
-      email = `${local}@${COMPANY_DOMAIN}`;
+      email = `${local}@${typedDom}`;
     } else {
       if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(raw)) { toast('Enter a full, valid email address.', 'error'); return; }
       email = raw;
-      if (!email.endsWith('@' + COMPANY_DOMAIN) && !await confirmDialog('Outside email',
-        `<b>${esc(email)}</b> is not a @${esc(COMPANY_DOMAIN)} address.<br>This person will be able to see and use the whole inventory. Add them?`, 'Add outside user')) return;
+      if (!isCompanyEmail(email) && !await confirmDialog('Outside email',
+        `<b>${esc(email)}</b> is not a company address (${COMPANY_DOMAINS.map(d => '@' + esc(d)).join(', ')}).<br>This person will be able to see and use the whole inventory. Add them?`, 'Add outside user')) return;
     }
     if (pass.length < 6) { toast('Password must be at least 6 characters.', 'error'); return; }
     if (email === ADMIN_EMAIL) { toast('That is your own (admin) account.', 'error'); return; }
@@ -1793,7 +1864,7 @@ function renderAdmin(el) {
     $('#results', el).innerHTML = list.length ? `<div class="table-wrap"><table class="tbl"><thead><tr>
       <th>Name</th><th>Email</th><th>Status</th><th class="num">Components</th><th>Added</th><th>Last login</th><th></th></tr></thead>
       <tbody>${list.map(u => `<tr class="${u.active ? '' : 'row-excluded'}">
-        <td class="strong">${esc(u.name)}</td><td>${esc(u.email)}${(u.email || '').toLowerCase().endsWith('@' + COMPANY_DOMAIN) ? '' : ' <span class="tag">outside</span>'}</td>
+        <td class="strong">${esc(u.name)}</td><td>${esc(u.email)}${isCompanyEmail(u.email) ? '' : ' <span class="tag">outside</span>'}</td>
         <td>${u.active ? '<span class="badge approved">active</span>' : '<span class="badge cancelled">removed</span>'}</td>
         <td class="num">${count(u.id)}</td><td>${esc(fmtDate(u.createdAt))}</td><td>${esc(u.lastLogin ? timeAgo(u.lastLogin) : 'never')}</td>
         <td class="actions">${u.active

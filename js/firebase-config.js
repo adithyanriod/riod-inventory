@@ -18,8 +18,10 @@ export const firebaseConfig = {
   appId: "1:882334493502:web:ea30b8adcecf6a28b29a6f"
 };
 
-// Only emails ending with this domain can sign in.
-export const COMPANY_DOMAIN = "riodlogic.com";
+// Company email domains. The first one is the default in "Add engineer".
+// Other emails can still be added by the admin (they are tagged "outside").
+export const COMPANY_DOMAINS = ["riodlogic.com", "riod.in"];
+export const COMPANY_DOMAIN = COMPANY_DOMAINS[0];
 
 // The admin: works like a normal engineer and can also add / remove engineers.
 // To change the admin, also change the same email in firestore.rules and re-publish the rules.
