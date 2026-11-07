@@ -1,0 +1,1612 @@
+// =====================================================================
+//  Riod Inventory — main application
+// =====================================================================
+import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js';
+import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js';
+import {
+  $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
+  openModal, confirmDialog, uniqSorted
+} from './util.js';
+import * as BOM from './bom.js';
+
+const {
+  signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
+  EmailAuthProvider, reauthenticateWithCredential, updatePassword,
+  collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, where,
+  serverTimestamp, runTransaction, writeBatch, Timestamp, increment
+} = fb;
+
+// ---------------------------------------------------------------------
+//  Constants
+// ---------------------------------------------------------------------
+const CATEGORIES = ['Resistor', 'Capacitor', 'Inductor', 'Ferrite Bead', 'Diode', 'LED', 'Transistor', 'MOSFET',
+  'IC', 'Connector', 'Crystal / Oscillator', 'Fuse', 'Switch', 'Relay', 'Sensor', 'Module', 'Battery',
+  'Test Point', 'Mechanical', 'Other'];
+const IC_TYPES = ['Microcontroller (MCU)', 'Buck Converter', 'Boost Converter', 'Buck-Boost Converter',
+  'LDO Regulator', 'Linear Regulator', 'PMIC', 'Battery Charger', 'Op-Amp', 'Comparator', 'ADC', 'DAC',
+  'Gate Driver', 'Motor Driver', 'LED Driver', 'Load Switch', 'eFuse / Protection', 'ESD / TVS',
+  'Interface (UART/RS-485/CAN)', 'USB Interface', 'Ethernet PHY', 'RF / Wireless', 'Memory (EEPROM/Flash)',
+  'Logic', 'Level Shifter', 'Sensor IC', 'Clock / Timer', 'Voltage Reference', 'Audio', 'Other'];
+const PACKAGES = ['01005', '0201', '0402', '0603', '0805', '1206', '1210', '1812', '2010', '2512',
+  'SOD-123', 'SOD-323', 'SOD-523', 'SMA', 'SMB', 'SMC', 'SOT-23', 'SOT-23-5', 'SOT-23-6', 'SOT-223',
+  'SOT-89', 'SOT-363', 'TO-252 (DPAK)', 'TO-263 (D2PAK)', 'TO-220', 'SOIC-8', 'SOIC-14', 'SOIC-16',
+  'TSSOP-8', 'TSSOP-14', 'TSSOP-16', 'TSSOP-20', 'MSOP-8', 'MSOP-10', 'QFN-16', 'QFN-20', 'QFN-24',
+  'QFN-32', 'QFN-48', 'DFN-8', 'LQFP-32', 'LQFP-48', 'LQFP-64', 'LQFP-100', 'BGA', 'WLCSP', 'DIP-8',
+  'Through Hole', 'Module'];
+const SITES = ['Mouser', 'DigiKey', 'LCSC', 'Element14 / Farnell', 'RS Components', 'Arrow', 'TME',
+  'Robu.in', 'Amazon', 'AliExpress'];
+const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked', taken: 'Taken',
+  request: 'Given on request', adjust: 'Qty adjusted' };
+const MAX_ROWS = 500;
+
+const ICONS = {
+  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  sparkle: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
+  alert: '<path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+  out: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  box: '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>',
+  plus: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
+  upload: '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M17 8l-5-5-5 5M12 3v12"/>',
+  swap: '<path d="M7 20V4M3 8l4-4 4 4M17 4v16M13 16l4 4 4-4"/>',
+  store: '<path d="M3 9l1.5-5h15L21 9"/><path d="M4 9v11h16V9"/><path d="M9 20v-6h6v6"/>',
+  users: '<circle cx="9" cy="8" r="4"/><path d="M2 21v-1a6 6 0 0112 0v1"/><path d="M16 4a4 4 0 010 8M22 21v-1a6 6 0 00-4-5.6"/>',
+};
+const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+
+// ---------------------------------------------------------------------
+//  State
+// ---------------------------------------------------------------------
+const S = {
+  profile: null, isAdmin: false,
+  components: [], vendors: [], users: [], reqIn: [], reqOut: [], activity: [],
+  unsubs: [], viewUpdate: null, loginTime: 0, ui: {}, loginMsg: '',
+};
+const myUid = () => S.profile?.uid;
+const findComp = id => S.components.find(c => c.id === id);
+const isLow = c => c.qty > 0 && c.qty < LOW_STOCK_THRESHOLD;
+const isOut = c => c.qty <= 0;
+const qtyClass = q => (q <= 0 ? 'out' : q < LOW_STOCK_THRESHOLD ? 'low' : 'ok');
+const keyOf = (pn, proj) => `${String(pn).trim().toLowerCase()}|${String(proj || '').trim().toLowerCase()}`;
+
+// ---------------------------------------------------------------------
+//  Boot
+// ---------------------------------------------------------------------
+function showOnly(id) {
+  for (const s of ['boot', 'login', 'setup', 'app']) $('#' + s).classList.toggle('hidden', s !== id);
+}
+
+function init() {
+  if (!isConfigured) { showOnly('setup'); return; }
+  wireLogin();
+  wireShell();
+  onAuthStateChanged(auth, handleAuth);
+}
+
+async function handleAuth(user) {
+  if (!user) {
+    teardown();
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search); // next login starts on the home page
+    showLogin();
+    return;
+  }
+  const email = (user.email || '').toLowerCase();
+  if (!email.endsWith('@' + COMPANY_DOMAIN)) {
+    S.loginMsg = `Only @${COMPANY_DOMAIN} email IDs can sign in.`;
+    await signOut(auth); return;
+  }
+  const isAdmin = email === ADMIN_EMAIL;
+  const ref = doc(db, 'users', user.uid);
+  let data;
+  try {
+    const snap = await getDoc(ref);
+    if (snap.exists()) data = snap.data();
+    if (isAdmin && !data) {
+      data = { name: 'Admin', email, role: 'admin', active: true, createdAt: serverTimestamp() };
+      await setDoc(ref, data);
+    }
+  } catch (e) {
+    console.error(e);
+    S.loginMsg = 'Could not read your account. Check that the Firestore rules are published (see README).';
+    await signOut(auth); return;
+  }
+  if (!data || data.active !== true) {
+    S.loginMsg = 'Your account is not active. Please contact the admin.';
+    await signOut(auth); return;
+  }
+  S.profile = { uid: user.uid, email, name: data.name || email.split('@')[0], role: isAdmin ? 'admin' : 'engineer' };
+  S.isAdmin = isAdmin;
+  updateDoc(ref, { lastLogin: serverTimestamp() }).catch(() => {});
+  startApp();
+}
+
+function showLogin() {
+  showOnly('login');
+  const msg = $('#loginMsg');
+  msg.textContent = S.loginMsg || '';
+  msg.className = 'form-msg' + (S.loginMsg ? ' error' : '');
+  S.loginMsg = '';
+}
+
+function friendlyAuthError(e) {
+  const c = e?.code || '';
+  if (/invalid-credential|wrong-password|user-not-found|invalid-email/.test(c)) return 'Incorrect email or password.';
+  if (c.includes('too-many-requests')) return 'Too many attempts. Please wait a few minutes and try again.';
+  if (c.includes('network')) return 'Network error. Check your internet connection.';
+  if (c.includes('user-disabled')) return 'This account has been disabled.';
+  return e?.message || 'Sign-in failed.';
+}
+
+function wireLogin() {
+  const form = $('#loginForm');
+  const msg = $('#loginMsg');
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = form.email.value.trim().toLowerCase();
+    const pass = form.password.value;
+    if (!email.endsWith('@' + COMPANY_DOMAIN)) {
+      msg.textContent = `Only @${COMPANY_DOMAIN} email IDs are allowed.`; msg.className = 'form-msg error'; return;
+    }
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true; btn.textContent = 'Signing in…';
+    msg.textContent = ''; msg.className = 'form-msg';
+    try { await signInWithEmailAndPassword(auth, email, pass); form.password.value = ''; }
+    catch (err) { msg.textContent = friendlyAuthError(err); msg.className = 'form-msg error'; }
+    finally { btn.disabled = false; btn.textContent = 'Sign in'; }
+  });
+  $('#forgot').addEventListener('click', async () => {
+    const email = form.email.value.trim().toLowerCase();
+    if (!email.endsWith('@' + COMPANY_DOMAIN)) {
+      msg.textContent = 'Type your @riodlogic.com email above first, then click "Forgot password".';
+      msg.className = 'form-msg error'; return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      msg.textContent = `If ${email} has an account, a password reset link has been sent to it.`;
+      msg.className = 'form-msg success';
+    } catch (err) { msg.textContent = friendlyAuthError(err); msg.className = 'form-msg error'; }
+  });
+}
+
+function wireShell() {
+  const menu = $('#userMenu');
+  $('#userBtn').addEventListener('click', e => { e.stopPropagation(); menu.classList.toggle('hidden'); });
+  document.addEventListener('click', () => menu.classList.add('hidden'));
+  menu.addEventListener('click', async e => {
+    const b = e.target.closest('[data-menu]');
+    if (!b) return;
+    menu.classList.add('hidden');
+    if (b.dataset.menu === 'logout') { await signOut(auth); }
+    if (b.dataset.menu === 'password') showPasswordModal();
+    if (b.dataset.menu === 'notify') requestNotify();
+  });
+  $('#menuToggle').addEventListener('click', () => $('#app').classList.toggle('nav-open'));
+  $('#nav').addEventListener('click', e => { if (e.target.closest('a')) $('#app').classList.remove('nav-open'); });
+  $('#enableNotify').addEventListener('click', requestNotify);
+  $('#dismissNotify').addEventListener('click', () => {
+    $('#notifyBanner').classList.add('hidden');
+    try { localStorage.setItem('riod.notifyDismissed', '1'); } catch { /* ignore */ }
+  });
+  window.addEventListener('hashchange', () => { if (S.profile) route(); });
+
+  // Every button with data-action inside the main view
+  $('#view').addEventListener('click', e => {
+    const b = e.target.closest('[data-action]');
+    if (!b) return;
+    ACTIONS[b.dataset.action]?.(b.dataset.id, b);
+  });
+}
+
+// ---------------------------------------------------------------------
+//  Live data
+// ---------------------------------------------------------------------
+function startApp() {
+  const { profile, isAdmin } = S;
+  teardown();
+  Object.assign(S, { profile, isAdmin });
+  S.loginTime = Date.now();
+  showOnly('app');
+  $('#userName').textContent = S.profile.name;
+  $('#userEmail').textContent = S.profile.email;
+  $('#avatar').textContent = (S.profile.name || '?').trim().charAt(0).toUpperCase();
+  buildNav();
+  subscribe();
+  route();
+  let dismissed = false;
+  try { dismissed = localStorage.getItem('riod.notifyDismissed') === '1'; } catch { /* ignore */ }
+  const canAsk = 'Notification' in window && Notification.permission === 'default';
+  $('#notifyBanner').classList.toggle('hidden', !(canAsk && !dismissed));
+}
+
+function teardown() {
+  S.unsubs.forEach(u => { try { u(); } catch { /* ignore */ } });
+  S.unsubs = [];
+  Object.assign(S, { profile: null, isAdmin: false, components: [], vendors: [], users: [], reqIn: [], reqOut: [], activity: [], viewUpdate: null, ui: {} });
+  $('#modalRoot').innerHTML = '';
+}
+
+function onSyncError(what) {
+  return e => {
+    console.error(what, e);
+    if (e.code === 'permission-denied') {
+      S.loginMsg = 'Access denied. Your account may have been removed, or the database rules are not published. Contact the admin.';
+      signOut(auth);
+    } else toast(`Sync problem (${what}): ${e.message}`, 'error', 6000);
+  };
+}
+
+function subscribe() {
+  const uid = myUid();
+  const add = u => S.unsubs.push(u);
+
+  add(onSnapshot(collection(db, 'components'), snap => {
+    S.components = snap.docs.map(d => {
+      const x = d.data();
+      return { id: d.id, ...x, qty: Number(x.qty) || 0 };
+    });
+    scheduleRender();
+  }, onSyncError('components')));
+
+  add(onSnapshot(collection(db, 'vendors'), snap => {
+    S.vendors = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    scheduleRender();
+  }, onSyncError('vendors')));
+
+  add(onSnapshot(collection(db, 'users'), snap => {
+    S.users = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    scheduleRender();
+  }, onSyncError('users')));
+
+  // Activity feed (last 30 days) -> "New Components" feed + desktop notifications
+  const since = Timestamp.fromMillis(Date.now() - 30 * 864e5);
+  add(onSnapshot(query(collection(db, 'activity'), where('createdAt', '>=', since)), snap => {
+    S.activity = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (toDate(b.createdAt) || 0) - (toDate(a.createdAt) || 0));
+    for (const ch of snap.docChanges()) {
+      if (ch.type !== 'added') continue;
+      const a = ch.doc.data();
+      if (a.byUid === uid) continue;
+      const t = toDate(a.createdAt);
+      if (!t || t.getTime() < S.loginTime - 5000) continue;
+      if (a.type === 'add') notify('New component added', `${a.byName} added ${a.qty} ${a.value} ${a.package}, ${a.description}`);
+      if (a.type === 'bom') notify('New components added', `${a.byName} added ${a.count} components (${a.totalQty} pcs) from a BOM — project ${a.project}`);
+    }
+    scheduleRender();
+  }, onSyncError('activity')));
+
+  if (S.isAdmin) return;
+
+  let firstIn = true;
+  add(onSnapshot(query(collection(db, 'requests'), where('ownerUid', '==', uid)), snap => {
+    S.reqIn = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (!firstIn) {
+      for (const ch of snap.docChanges()) {
+        const r = ch.doc.data();
+        if (ch.type === 'added' && r.status === 'pending')
+          notify('Component request', `${r.requesterName} requests ${r.qtyRequested} × ${r.partNumber} (${r.value} ${r.package})`);
+      }
+    }
+    firstIn = false;
+    scheduleRender();
+  }, onSyncError('requests')));
+
+  const prevStatus = new Map();
+  add(onSnapshot(query(collection(db, 'requests'), where('requesterUid', '==', uid)), snap => {
+    S.reqOut = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    for (const ch of snap.docChanges()) {
+      const r = ch.doc.data();
+      const before = prevStatus.get(ch.doc.id);
+      if (ch.type === 'modified' && before === 'pending' && r.status !== 'pending') {
+        if (r.status === 'approved') notify('Request approved', `${r.ownerName} approved ${r.qtyApproved} × ${r.partNumber}. Collect it from them.`);
+        if (r.status === 'rejected') notify('Request rejected', `${r.ownerName} rejected your request for ${r.partNumber}${r.ownerNote ? ': ' + r.ownerNote : ''}`);
+      }
+      prevStatus.set(ch.doc.id, r.status);
+    }
+    scheduleRender();
+  }, onSyncError('requests')));
+}
+
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  setTimeout(() => {
+    renderQueued = false;
+    if (!S.profile) return;
+    updateNavCounts();
+    fillDatalists();
+    try { S.viewUpdate?.(); } catch (e) { console.error(e); }
+  }, 30);
+}
+
+// ---------------------------------------------------------------------
+//  Notifications
+// ---------------------------------------------------------------------
+function notify(title, body) {
+  toast(`<strong>${esc(title)}</strong><br>${esc(body)}`, 'info', 7000, true);
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      const n = new Notification(title, { body, icon: 'assets/icon.png' });
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch (e) { console.warn(e); }
+  }
+}
+
+async function requestNotify() {
+  if (!('Notification' in window)) { toast('This browser does not support desktop notifications.', 'error'); return; }
+  const p = await Notification.requestPermission();
+  $('#notifyBanner').classList.add('hidden');
+  if (p === 'granted') {
+    toast('Desktop notifications are on. Keep this tab open (it can stay in the background).', 'success', 5000);
+    new Notification('Riod Inventory', { body: 'Notifications are working!', icon: 'assets/icon.png' });
+  } else toast('Notifications blocked. Allow them from the lock icon in the address bar.', 'error', 6000);
+}
+
+// ---------------------------------------------------------------------
+//  Navigation
+// ---------------------------------------------------------------------
+const NAV = [
+  { id: 'search', label: 'Search Inventory', icon: 'search' },
+  { id: 'new', label: 'New Components', icon: 'sparkle', count: () => S.components.filter(c => isRecent(c, 7)).length, cls: 'accent' },
+  { id: 'low', label: 'Low Stock', icon: 'alert', count: () => S.components.filter(isLow).length, cls: 'warn' },
+  { id: 'out', label: 'Out of Stock', icon: 'out', count: () => S.components.filter(isOut).length, cls: 'danger' },
+  { sep: 'My work', engineer: true },
+  { id: 'my', label: 'My Inventory', icon: 'box', engineer: true },
+  { id: 'add', label: 'Add Component', icon: 'plus', engineer: true },
+  { id: 'import', label: 'Import BOM / Excel', icon: 'upload', engineer: true },
+  { id: 'requests', label: 'Requests', icon: 'swap', engineer: true, count: () => S.reqIn.filter(r => r.status === 'pending').length, cls: 'accent' },
+  { sep: 'Directory' },
+  { id: 'vendors', label: 'Vendors', icon: 'store' },
+  { id: 'admin', label: 'Manage Engineers', icon: 'users', admin: true },
+];
+const navVisible = n => !(n.engineer && S.isAdmin) && !(n.admin && !S.isAdmin);
+
+function buildNav() {
+  $('#nav').innerHTML = NAV.filter(navVisible).map(n => n.sep
+    ? `<div class="nav-sep">${esc(n.sep)}</div>`
+    : `<a href="#${n.id}" data-nav="${n.id}">${icon(n.icon)}<span>${esc(n.label)}</span>${n.count ? `<b class="count ${n.cls || ''}" data-count="${n.id}"></b>` : ''}</a>`
+  ).join('');
+}
+
+function updateNavCounts() {
+  for (const n of NAV) {
+    if (!n.count) continue;
+    const el = $(`[data-count="${n.id}"]`);
+    if (!el) continue;
+    const v = n.count();
+    el.textContent = v || '';
+    el.classList.toggle('hidden', !v);
+  }
+}
+
+const VIEWS = {
+  search: { title: 'Search Inventory', render: el => renderList(el, LIST_CFG.search) },
+  new: { title: 'New Components', render: el => renderList(el, LIST_CFG.new) },
+  low: { title: 'Low Stock', render: el => renderList(el, LIST_CFG.low) },
+  out: { title: 'Out of Stock', render: el => renderList(el, LIST_CFG.out) },
+  my: { title: 'My Inventory', render: renderMy, engineer: true },
+  add: { title: 'Add Component', render: renderAdd, engineer: true },
+  import: { title: 'Import BOM / Excel', render: renderImport, engineer: true },
+  requests: { title: 'Component Requests', render: renderRequests, engineer: true },
+  vendors: { title: 'Vendors', render: renderVendors },
+  admin: { title: 'Manage Engineers', render: renderAdmin, admin: true },
+};
+
+function route() {
+  let v = location.hash.slice(1) || (S.isAdmin ? 'admin' : 'search');
+  const def = VIEWS[v];
+  if (!def || !navVisible(def)) v = 'search';
+  $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.nav === v));
+  $('#viewTitle').textContent = VIEWS[v].title;
+  document.title = `${VIEWS[v].title} · Riod Inventory`;
+  const el = $('#view');
+  el.innerHTML = '';
+  S.viewUpdate = null;
+  S.viewUpdate = VIEWS[v].render(el) || null;
+  updateNavCounts();
+  fillDatalists();
+  window.scrollTo(0, 0);
+}
+
+// ---------------------------------------------------------------------
+//  Datalists (suggestions while typing)
+// ---------------------------------------------------------------------
+const dlCache = {};
+function setDatalist(id, values) {
+  const html = values.map(v => `<option value="${esc(v)}"></option>`).join('');
+  if (dlCache[id] === html) return;
+  dlCache[id] = html;
+  $('#' + id).innerHTML = html;
+}
+function fillDatalists() {
+  const C = S.components;
+  setDatalist('dl-packages', uniqSorted([...PACKAGES, ...C.map(c => c.package)]));
+  setDatalist('dl-ictypes', uniqSorted([...IC_TYPES, ...C.map(c => c.icType)]));
+  setDatalist('dl-categories', uniqSorted([...CATEGORIES, ...C.map(c => c.category)]));
+  setDatalist('dl-mfrs', uniqSorted(C.map(c => c.manufacturer)));
+  const mine = uniqSorted(C.filter(c => c.ownerUid === myUid()).map(c => c.project));
+  setDatalist('dl-projects', uniqSorted([...mine, ...C.map(c => c.project)]));
+  setDatalist('dl-sites', uniqSorted([...SITES, ...C.filter(c => c.sourceType === 'online').map(c => c.sourceName)]));
+}
+
+// ---------------------------------------------------------------------
+//  Search & component tables
+// ---------------------------------------------------------------------
+function compText(c) {
+  if (c._t) return c._t;
+  const base = [c.partNumber, c.value, c.package, c.description, c.category, c.icType, c.manufacturer,
+    c.project, c.ownerName, c.sourceName].filter(Boolean).join(' ').toLowerCase();
+  c._t = base + ' ' + normValue(base);
+  return c._t;
+}
+function matchQuery(c, q) {
+  const tokens = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return true;
+  const txt = compText(c);
+  return tokens.every(t => txt.includes(t) || txt.includes(normValue(t)));
+}
+function isRecent(c, days) {
+  const d = toDate(c.lastAddedAt || c.createdAt);
+  return !!d && d.getTime() >= Date.now() - days * 864e5;
+}
+function sourceLabel(c) {
+  if (c.sourceType === 'vendor') return `Vendor${c.sourceName ? ' · ' + c.sourceName : ''}`;
+  return `Online${c.sourceName ? ' · ' + c.sourceName : ''}`;
+}
+
+function rowActions(c) {
+  const mine = c.ownerUid === myUid();
+  const a = [`<button class="btn sm ghost" data-action="details" data-id="${c.id}">Details</button>`];
+  if (S.isAdmin) return a.join('');
+  if (mine) {
+    if (c.qty > 0) a.push(`<button class="btn sm" data-action="take" data-id="${c.id}">Mark taken</button>`);
+    a.push(`<button class="btn sm" data-action="edit" data-id="${c.id}">${c.qty > 0 ? 'Edit' : 'Restock'}</button>`);
+  } else if (c.qty > 0) {
+    a.push(`<button class="btn sm primary" data-action="request" data-id="${c.id}">Request</button>`);
+  }
+  return a.join('');
+}
+
+function componentTable(list, opt = {}) {
+  if (!list.length) return `<div class="empty">${opt.empty || 'No components found.'}</div>`;
+  const showOwner = opt.owner !== false, showProject = opt.project !== false;
+  const shown = list.slice(0, MAX_ROWS);
+  return `<div class="table-wrap"><table class="tbl">
+    <thead><tr>
+      <th>Part Number</th><th>Value</th><th>Package</th><th>Description</th><th>Category</th><th>Manufacturer</th>
+      <th class="num">Qty left</th>${showOwner ? '<th>Held by</th>' : ''}${showProject ? '<th>Project</th>' : ''}
+      ${opt.date ? '<th>Added</th>' : ''}<th></th>
+    </tr></thead>
+    <tbody>${shown.map(c => `<tr>
+      <td class="mono strong">${esc(c.partNumber)}</td>
+      <td>${esc(c.value)}</td>
+      <td><span class="pkg">${esc(c.package)}</span></td>
+      <td class="desc">${esc(c.description)}${c.icType ? ` <span class="tag">${esc(c.icType)}</span>` : ''}</td>
+      <td>${esc(c.category || '')}</td>
+      <td>${esc(c.manufacturer || '')}</td>
+      <td class="num"><span class="qty ${qtyClass(c.qty)}">${c.qty}</span></td>
+      ${showOwner ? `<td>${esc(c.ownerName)}${c.ownerUid === myUid() ? ' <span class="you">you</span>' : ''}</td>` : ''}
+      ${showProject ? `<td>${esc(c.project || '')}</td>` : ''}
+      ${opt.date ? `<td class="nowrap" title="${esc(fmtDateTime(c.lastAddedAt || c.createdAt))}">${esc(timeAgo(c.lastAddedAt || c.createdAt))}</td>` : ''}
+      <td class="actions">${rowActions(c)}</td>
+    </tr>`).join('')}</tbody></table></div>
+    ${list.length > MAX_ROWS ? `<p class="muted small">Showing first ${MAX_ROWS} of ${list.length}. Refine your search to see more.</p>` : ''}`;
+}
+
+const SORTS = {
+  pn: (a, b) => a.partNumber.localeCompare(b.partNumber, undefined, { numeric: true, sensitivity: 'base' }),
+  qty: (a, b) => a.qty - b.qty,
+  qtyd: (a, b) => b.qty - a.qty,
+  new: (a, b) => (toDate(b.lastAddedAt || b.createdAt) || 0) - (toDate(a.lastAddedAt || a.createdAt) || 0),
+  owner: (a, b) => (a.ownerName || '').localeCompare(b.ownerName || ''),
+};
+
+const LIST_CFG = {
+  search: {
+    key: 'search', outToggle: true, sort: 'pn',
+    predicate: () => () => true,
+    placeholder: 'Search anything: part number, value (10k, 100nF), size (0603), description (buck, LDO)…',
+  },
+  new: {
+    key: 'new', sort: 'new', date: true, days: true, feed: true,
+    predicate: st => c => isRecent(c, st.days),
+    intro: 'Components added or restocked recently by everyone in the team.',
+    empty: 'No components were added in this period.',
+  },
+  low: {
+    key: 'low', sort: 'qty',
+    predicate: () => isLow,
+    intro: `Items with fewer than ${LOW_STOCK_THRESHOLD} pieces left. Reorder soon.`,
+    empty: 'Nothing is running low.',
+  },
+  out: {
+    key: 'out', sort: 'pn',
+    predicate: () => isOut,
+    intro: 'Items with 0 pieces left. Owners can click <b>Restock</b> after buying more.',
+    empty: 'Nothing is out of stock.',
+  },
+};
+
+function renderList(el, cfg) {
+  const st = S.ui[cfg.key] ||= { q: '', pkg: '', cat: '', owner: '', proj: '', out: false, sort: cfg.sort, days: 30 };
+  el.innerHTML = `
+    ${cfg.intro ? `<p class="intro">${cfg.intro}</p>` : ''}
+    ${cfg.feed ? '<div id="feed"></div>' : ''}
+    <div class="toolbar">
+      <input id="q" class="search" type="search" autocomplete="off" placeholder="${esc(cfg.placeholder || 'Search in this list…')}" value="${esc(st.q)}">
+      <div class="filters">
+        <select id="f-pkg" title="Package / size"></select>
+        <select id="f-cat" title="Category"></select>
+        <select id="f-owner" title="Held by"></select>
+        <select id="f-proj" title="Project"></select>
+        ${cfg.days ? `<select id="f-days" title="Period">${[7, 30, 90, 365].map(d => `<option value="${d}" ${st.days === d ? 'selected' : ''}>Last ${d} days</option>`).join('')}</select>` : ''}
+        <select id="f-sort" title="Sort">
+          ${[['pn', 'Part number A–Z'], ['qty', 'Qty: low → high'], ['qtyd', 'Qty: high → low'], ['new', 'Newest first'], ['owner', 'Held by']]
+            .map(([v, l]) => `<option value="${v}" ${st.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+        ${cfg.outToggle ? `<label class="chk"><input type="checkbox" id="f-out" ${st.out ? 'checked' : ''}> Include out of stock</label>` : ''}
+      </div>
+    </div>
+    <div id="summary" class="summary"></div>
+    <div id="results"></div>`;
+
+  const fill = (id, label, values, cur) => {
+    const s = $('#' + id, el);
+    s.innerHTML = `<option value="">${label}</option>` +
+      values.map(v => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(v)}</option>`).join('');
+  };
+
+  const update = () => {
+    const base = S.components.filter(cfg.predicate(st));
+    fill('f-pkg', 'All sizes / packages', uniqSorted(base.map(c => c.package)), st.pkg);
+    fill('f-cat', 'All categories', uniqSorted(base.map(c => c.category)), st.cat);
+    fill('f-owner', 'All engineers', uniqSorted(base.map(c => c.ownerName)), st.owner);
+    fill('f-proj', 'All projects', uniqSorted(base.map(c => c.project)), st.proj);
+    let list = base.filter(c =>
+      (!st.pkg || c.package === st.pkg) && (!st.cat || c.category === st.cat) &&
+      (!st.owner || c.ownerName === st.owner) && (!st.proj || c.project === st.proj) && matchQuery(c, st.q));
+    let hiddenOut = 0;
+    if (cfg.outToggle && !st.out) { const before = list.length; list = list.filter(c => c.qty > 0); hiddenOut = before - list.length; }
+    list.sort(SORTS[st.sort] || SORTS.pn);
+    const pcs = list.reduce((s, c) => s + c.qty, 0);
+    $('#summary', el).innerHTML = `<b>${list.length}</b> item${list.length === 1 ? '' : 's'} · <b>${pcs.toLocaleString()}</b> pcs` +
+      (hiddenOut ? ` · <span class="muted">${hiddenOut} out-of-stock hidden (see <a href="#out">Out of Stock</a>)</span>` : '');
+    $('#results', el).innerHTML = componentTable(list, { date: cfg.date, empty: cfg.empty });
+    if (cfg.feed) $('#feed', el).innerHTML = activityFeed();
+  };
+
+  const q = $('#q', el);
+  q.addEventListener('input', debounce(() => { st.q = q.value; update(); }, 120));
+  for (const [id, k] of [['f-pkg', 'pkg'], ['f-cat', 'cat'], ['f-owner', 'owner'], ['f-proj', 'proj'], ['f-sort', 'sort']])
+    $('#' + id, el).addEventListener('change', e => { st[k] = e.target.value; update(); });
+  $('#f-days', el)?.addEventListener('change', e => { st.days = Number(e.target.value); update(); });
+  $('#f-out', el)?.addEventListener('change', e => { st.out = e.target.checked; update(); });
+  update();
+  if (cfg.key === 'search') q.focus();
+  return update;
+}
+
+function activityFeed() {
+  const items = S.activity.slice(0, 8);
+  if (!items.length) return '';
+  return `<div class="card feed"><h4>Recent activity</h4><ul>${items.map(a => {
+    const who = `<b>${esc(a.byName)}</b>`;
+    const txt = a.type === 'bom'
+      ? `${who} imported <b>${a.count}</b> components (${a.totalQty} pcs) into <b>${esc(a.project)}</b>`
+      : `${who} added <b>${a.qty}</b> × ${esc(a.value)} ${esc(a.package)} — ${esc(a.description)} <span class="muted">(${esc(a.partNumber)})</span>`;
+    return `<li>${txt}<span class="muted small"> · ${esc(timeAgo(a.createdAt))}</span></li>`;
+  }).join('')}</ul></div>`;
+}
+
+// ---------------------------------------------------------------------
+//  My Inventory
+// ---------------------------------------------------------------------
+function renderMy(el) {
+  const st = S.ui.my ||= { proj: '', q: '' };
+  el.innerHTML = `
+    <div class="my-layout">
+      <aside class="card proj-list"><h4>My projects</h4><div id="projs"></div></aside>
+      <section>
+        <div class="toolbar">
+          <input id="q" class="search" type="search" autocomplete="off" placeholder="Search my components…" value="${esc(st.q)}">
+          <a class="btn primary" href="#add">+ Add component</a>
+          <a class="btn" href="#import">Import BOM</a>
+        </div>
+        <div id="summary" class="summary"></div>
+        <div id="results"></div>
+      </section>
+    </div>`;
+
+  const update = () => {
+    const mine = S.components.filter(c => c.ownerUid === myUid());
+    const projects = uniqSorted(mine.map(c => c.project || 'General'));
+    if (st.proj && !projects.includes(st.proj)) st.proj = '';
+    const count = p => mine.filter(c => (c.project || 'General') === p).length;
+    $('#projs', el).innerHTML =
+      `<button class="proj ${!st.proj ? 'active' : ''}" data-proj="">All projects <span>${mine.length}</span></button>` +
+      projects.map(p => `<button class="proj ${st.proj === p ? 'active' : ''}" data-proj="${esc(p)}">${esc(p)} <span>${count(p)}</span></button>`).join('') +
+      (projects.length ? '' : '<p class="muted small">No projects yet.</p>');
+    const list = mine.filter(c => (!st.proj || (c.project || 'General') === st.proj) && matchQuery(c, st.q)).sort(SORTS.pn);
+    const pcs = list.reduce((s, c) => s + c.qty, 0);
+    const lowN = list.filter(isLow).length, outN = list.filter(isOut).length;
+    $('#summary', el).innerHTML = `<b>${list.length}</b> items · <b>${pcs.toLocaleString()}</b> pcs` +
+      (lowN ? ` · <span class="text-warn">${lowN} low</span>` : '') + (outN ? ` · <span class="text-bad">${outN} out of stock</span>` : '');
+    if (!mine.length) {
+      $('#results', el).innerHTML = `<div class="empty">You have not added any components yet.<br><a href="#add">Add a component</a> or <a href="#import">import a BOM</a>.</div>`;
+      return;
+    }
+    const groups = st.proj ? [st.proj] : uniqSorted(list.map(c => c.project || 'General'));
+    $('#results', el).innerHTML = groups.map(p => {
+      const g = list.filter(c => (c.project || 'General') === p);
+      if (!g.length) return '';
+      return `<div class="group"><h3 class="group-title">${icon('box')} ${esc(p)} <span class="muted small">${g.length} items</span></h3>${componentTable(g, { owner: false, project: false })}</div>`;
+    }).join('') || '<div class="empty">No matching components.</div>';
+  };
+
+  $('#projs', el).addEventListener('click', e => {
+    const b = e.target.closest('[data-proj]');
+    if (!b) return;
+    st.proj = b.dataset.proj;
+    update();
+  });
+  const q = $('#q', el);
+  q.addEventListener('input', debounce(() => { st.q = q.value; update(); }, 120));
+  update();
+  return update;
+}
+
+// ---------------------------------------------------------------------
+//  Component form (shared by Add and Edit)
+// ---------------------------------------------------------------------
+function componentFields(c = {}, editing = false) {
+  return `
+  <div class="grid">
+    <label>Part Number <i>*</i><input name="partNumber" required value="${esc(c.partNumber)}" placeholder="e.g. RC0603FR-0710KL"></label>
+    <label>Value <i>*</i><input name="value" required value="${esc(c.value)}" placeholder="10k, 100nF, 3.3V, STM32F103"></label>
+    <label>Package / Size <i>*</i><input name="package" list="dl-packages" required value="${esc(c.package)}" placeholder="0402, 0603, SOT-23, QFN-32"></label>
+    <label>Category<select name="category"><option value="">— Select —</option>${CATEGORIES.map(x => `<option ${c.category === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}${c.category && !CATEGORIES.includes(c.category) ? `<option selected>${esc(c.category)}</option>` : ''}</select></label>
+    <label class="ic-only ${c.category === 'IC' ? '' : 'hidden'}">IC type<input name="icType" list="dl-ictypes" value="${esc(c.icType)}" placeholder="Buck Converter, LDO, MCU…"></label>
+    <label>Manufacturer<input name="manufacturer" list="dl-mfrs" value="${esc(c.manufacturer)}" placeholder="TI, Yageo, Murata…"></label>
+    <label class="span2">Description / what part is it <i>*</i><input name="description" required value="${esc(c.description)}" placeholder="e.g. Resistor 10k 1% 1/10W — or — Buck converter 3A 17V input"></label>
+    <label>${editing ? 'Quantity in stock' : 'Quantity'} <i>*</i><input name="qty" type="number" min="0" step="1" required value="${c.qty ?? ''}"></label>
+    <label>Project<input name="project" list="dl-projects" value="${esc(c.project)}" placeholder="General"></label>
+  </div>`;
+}
+
+function wireComponentForm(form) {
+  const cat = form.querySelector('[name=category]');
+  const ic = form.querySelector('.ic-only');
+  cat.addEventListener('change', () => ic.classList.toggle('hidden', cat.value !== 'IC'));
+  const desc = form.querySelector('[name=description]');
+  desc.addEventListener('blur', () => {
+    if (cat.value) return;
+    const g = BOM.guessCategory('', `${desc.value} ${form.querySelector('[name=value]').value}`);
+    if (g) {
+      cat.value = g; ic.classList.toggle('hidden', g !== 'IC');
+      if (g === 'IC' && !form.querySelector('[name=icType]').value) form.querySelector('[name=icType]').value = BOM.guessIcType(desc.value);
+    }
+  });
+}
+
+function readComponentForm(form) {
+  const g = k => String(form.querySelector(`[name=${k}]`)?.value ?? '').trim();
+  const qtyRaw = g('qty');
+  return {
+    partNumber: g('partNumber'), value: g('value'), package: g('package'), description: g('description'),
+    category: g('category'), icType: g('category') === 'IC' ? g('icType') : '', manufacturer: g('manufacturer'),
+    qty: /^\d+$/.test(qtyRaw) ? parseInt(qtyRaw, 10) : NaN,
+    project: g('project') || 'General',
+  };
+}
+
+function validateComp(d) {
+  const miss = [];
+  if (!d.partNumber) miss.push('Part Number');
+  if (!d.value) miss.push('Value');
+  if (!d.package) miss.push('Package / Size');
+  if (!d.description) miss.push('Description');
+  if (!Number.isInteger(d.qty) || d.qty < 0) miss.push('Quantity (whole number)');
+  return miss.length ? `Please fill: ${miss.join(', ')}` : '';
+}
+
+function newComponentDoc(d, src) {
+  const cut = (s, n = 500) => String(s ?? '').trim().slice(0, n);
+  return {
+    partNumber: cut(d.partNumber, 200), value: cut(d.value, 200), package: cut(d.package, 200),
+    description: cut(d.description), category: cut(d.category, 100), icType: cut(d.icType, 100),
+    manufacturer: cut(d.manufacturer, 200), qty: d.qty, project: cut(d.project || 'General', 200),
+    sourceType: src.sourceType, sourceName: src.sourceName, vendorId: src.vendorId,
+    ownerUid: myUid(), ownerName: S.profile.name,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), lastAddedAt: serverTimestamp(),
+  };
+}
+
+// ---- Source: Online site / Vendor (with autocomplete of saved vendors) ----
+function sourceFields(c = {}) {
+  const isV = c.sourceType === 'vendor';
+  const v = isV && c.vendorId ? S.vendors.find(x => x.id === c.vendorId) : null;
+  return `
+  <fieldset class="source" data-vendor-id="${esc(isV ? c.vendorId || '' : '')}">
+    <legend>Source — where was it bought from?</legend>
+    <div class="seg">
+      <label><input type="radio" name="srcType" value="online" ${!isV ? 'checked' : ''}> Online</label>
+      <label><input type="radio" name="srcType" value="vendor" ${isV ? 'checked' : ''}> Vendor</label>
+    </div>
+    <div class="src-online ${isV ? 'hidden' : ''}">
+      <label>Site name <span class="opt">(optional)</span><input name="site" list="dl-sites" value="${esc(!isV ? c.sourceName || '' : '')}" placeholder="Mouser, DigiKey, LCSC…"></label>
+    </div>
+    <div class="src-vendor grid ${isV ? '' : 'hidden'}">
+      <div class="ac"><label>Vendor name <span class="opt">(optional)</span><input name="vendorName" autocomplete="off" value="${esc(isV ? c.sourceName || '' : '')}" placeholder="Start typing to pick a saved vendor"></label><div class="ac-list hidden"></div></div>
+      <label>Contact person<input name="vendorContact" value="${esc(v?.contact)}"></label>
+      <label>Phone<input name="vendorPhone" value="${esc(v?.phone)}"></label>
+      <label>Email<input name="vendorEmail" type="email" value="${esc(v?.email)}"></label>
+    </div>
+  </fieldset>`;
+}
+
+function wireSource(root) {
+  const fs = root.querySelector('fieldset.source');
+  if (!fs) return;
+  fs.querySelectorAll('input[name=srcType]').forEach(r => r.addEventListener('change', () => {
+    const v = fs.querySelector('input[name=srcType]:checked').value;
+    fs.querySelector('.src-online').classList.toggle('hidden', v !== 'online');
+    fs.querySelector('.src-vendor').classList.toggle('hidden', v !== 'vendor');
+  }));
+  const inp = fs.querySelector('[name=vendorName]');
+  const list = fs.querySelector('.ac-list');
+  let items = [], active = -1;
+  const pick = v => {
+    inp.value = v.name;
+    fs.querySelector('[name=vendorContact]').value = v.contact || '';
+    fs.querySelector('[name=vendorPhone]').value = v.phone || '';
+    fs.querySelector('[name=vendorEmail]').value = v.email || '';
+    fs.dataset.vendorId = v.id;
+    list.classList.add('hidden');
+  };
+  const show = () => {
+    const t = inp.value.trim().toLowerCase();
+    items = S.vendors.filter(v => !t || [v.name, v.contact, v.phone, v.email].some(x => String(x || '').toLowerCase().includes(t))).slice(0, 8);
+    active = -1;
+    if (!items.length) { list.classList.add('hidden'); return; }
+    list.innerHTML = items.map((v, i) => `<div class="ac-item" data-i="${i}"><strong>${esc(v.name)}</strong><span>${esc([v.contact, v.phone, v.email].filter(Boolean).join(' · ') || 'no contact saved')}</span></div>`).join('');
+    list.classList.remove('hidden');
+  };
+  inp.addEventListener('input', () => { fs.dataset.vendorId = ''; show(); });
+  inp.addEventListener('focus', show);
+  inp.addEventListener('blur', () => setTimeout(() => list.classList.add('hidden'), 150));
+  inp.addEventListener('keydown', e => {
+    if (list.classList.contains('hidden')) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      $$('.ac-item', list).forEach((x, i) => x.classList.toggle('active', i === active));
+    } else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); e.stopPropagation(); pick(items[active]); }
+    else if (e.key === 'Escape') list.classList.add('hidden');
+  });
+  list.addEventListener('mousedown', e => {
+    const it = e.target.closest('.ac-item');
+    if (!it) return;
+    e.preventDefault();
+    pick(items[Number(it.dataset.i)]);
+  });
+}
+
+function readSource(root) {
+  const fs = root.querySelector('fieldset.source');
+  const g = k => String(fs.querySelector(`[name=${k}]`)?.value ?? '').trim();
+  return {
+    type: fs.querySelector('input[name=srcType]:checked')?.value || 'online',
+    site: g('site'), vendorName: g('vendorName'), contact: g('vendorContact'), phone: g('vendorPhone'),
+    email: g('vendorEmail'), vendorId: fs.dataset.vendorId || '',
+  };
+}
+
+// Saves a new vendor if needed; returns the source fields stored on the component.
+async function resolveSource(src) {
+  if (src.type !== 'vendor') return { sourceType: 'online', sourceName: src.site, vendorId: '' };
+  if (!src.vendorName) return { sourceType: 'vendor', sourceName: '', vendorId: '' };
+  let v = (src.vendorId && S.vendors.find(x => x.id === src.vendorId)) ||
+    S.vendors.find(x => (x.name || '').toLowerCase() === src.vendorName.toLowerCase());
+  if (v) {
+    const patch = {};
+    for (const k of ['contact', 'phone', 'email']) if (src[k] && src[k] !== (v[k] || '')) patch[k] = src[k];
+    if (Object.keys(patch).length) await updateDoc(doc(db, 'vendors', v.id), { ...patch, updatedAt: serverTimestamp() });
+    return { sourceType: 'vendor', sourceName: v.name, vendorId: v.id };
+  }
+  const ref = await addDoc(collection(db, 'vendors'), {
+    name: src.vendorName, contact: src.contact, phone: src.phone, email: src.email, notes: '',
+    createdBy: myUid(), createdByName: S.profile.name, createdAt: serverTimestamp(),
+  });
+  return { sourceType: 'vendor', sourceName: src.vendorName, vendorId: ref.id };
+}
+
+// ---------------------------------------------------------------------
+//  Add Component
+// ---------------------------------------------------------------------
+function renderAdd(el) {
+  el.innerHTML = `
+    <form id="addForm" class="card form" novalidate>
+      <p class="muted small">Fields marked <i class="req">*</i> are mandatory. Everyone in the team gets a desktop notification when you add a component.</p>
+      ${componentFields({ project: S.ui.lastProject || '' })}
+      ${sourceFields(S.ui.lastSource || {})}
+      <div class="form-actions">
+        <button class="btn primary" type="submit">Add component</button>
+        <button class="btn ghost" type="button" id="clear">Clear</button>
+      </div>
+    </form>`;
+  const form = $('#addForm', el);
+  wireComponentForm(form);
+  wireSource(form);
+  $('#clear', el).onclick = () => route();
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const d = readComponentForm(form);
+    const err = validateComp(d);
+    if (err) { toast(err, 'error'); return; }
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+      const existing = S.components.find(c => c.ownerUid === myUid() && keyOf(c.partNumber, c.project) === keyOf(d.partNumber, d.project));
+      if (existing) {
+        const ok = await confirmDialog('Already in your inventory',
+          `You already have <b>${existing.qty}</b> × <b>${esc(existing.partNumber)}</b> in project <b>${esc(existing.project)}</b>.<br>Add <b>${d.qty}</b> more to that stock (new total ${existing.qty + d.qty})?`,
+          'Add to existing');
+        if (!ok) return;
+      }
+      const src = await resolveSource(readSource(form));
+      let id;
+      if (existing) {
+        id = existing.id;
+        await updateDoc(doc(db, 'components', id), { qty: increment(d.qty), lastAddedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      } else {
+        id = (await addDoc(collection(db, 'components'), newComponentDoc(d, src))).id;
+      }
+      await logTx({ componentId: id, partNumber: d.partNumber, type: existing ? 'restock' : 'added', delta: d.qty });
+      await addDoc(collection(db, 'activity'), {
+        type: 'add', byUid: myUid(), byName: S.profile.name, qty: d.qty, value: d.value, package: d.package,
+        description: d.description, partNumber: d.partNumber, project: d.project, createdAt: serverTimestamp(),
+      });
+      S.ui.lastProject = d.project;
+      S.ui.lastSource = { sourceType: src.sourceType, sourceName: src.sourceName, vendorId: src.vendorId };
+      toast(`Added ${d.qty} × ${d.partNumber}`, 'success');
+      route(); // fresh form, keeps last project & source
+    } catch (err2) {
+      console.error(err2); toast(err2.message, 'error', 6000);
+    } finally { btn.disabled = false; }
+  });
+  return null;
+}
+
+function logTx(t) {
+  return addDoc(collection(db, 'transactions'), {
+    note: '', toName: '', ...t, byUid: myUid(), byName: S.profile.name, createdAt: serverTimestamp(),
+  });
+}
+
+// ---------------------------------------------------------------------
+//  Import BOM / Excel
+// ---------------------------------------------------------------------
+function renderImport(el) {
+  const st = { wb: null, fileName: '', sheet: '', rows: [], headerIdx: 0, headers: [], map: {}, items: [], onlyBad: false };
+  el.innerHTML = `
+    <div class="notice warn">
+      <strong>Before you import:</strong> add a separate column named <b>Stock Qty</b> to your Excel / BOM file.
+      The stock quantity is read <u>only</u> from the <b>Stock Qty</b> column. The BOM's per-board "Qty" or "Quantity" column is ignored.
+      <br>Mandatory columns: <b>Part Number</b>, <b>Value</b>, <b>Package / Size</b>, <b>Description</b> and <b>Stock Qty</b>.
+      Optional: Manufacturer, Category, Designator, Project.
+      <div class="notice-actions"><button class="btn sm" id="tpl" type="button">Download Excel template</button></div>
+    </div>
+    <div class="card form" id="importSetup">
+      <div class="grid">
+        <label class="span2">BOM / Excel file (.xlsx, .xls, .csv)<input type="file" id="file" accept=".xlsx,.xls,.csv"></label>
+        <label>Sheet<select id="sheet" disabled><option>—</option></select></label>
+        <label>Project name <i>*</i><input id="proj" list="dl-projects" placeholder="e.g. Motor Controller Rev B"></label>
+      </div>
+      ${sourceFields(S.ui.lastSource || {})}
+    </div>
+    <div id="mapping"></div>
+    <div id="preview"></div>`;
+  wireSource($('#importSetup', el));
+  $('#tpl', el).onclick = () => BOM.downloadTemplate();
+  const projInput = $('#proj', el);
+  projInput.addEventListener('input', () => refreshAll());
+
+  $('#file', el).addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      st.wb = await BOM.readWorkbook(f);
+      st.fileName = f.name;
+      if (!projInput.value.trim()) projInput.value = f.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/\bbom\b/ig, '').trim();
+      const sel = $('#sheet', el);
+      sel.innerHTML = st.wb.SheetNames.map(n => `<option>${esc(n)}</option>`).join('');
+      sel.disabled = st.wb.SheetNames.length < 2;
+      loadSheet(st.wb.SheetNames[0]);
+    } catch (err) { console.error(err); toast('Could not read this file: ' + err.message, 'error', 6000); }
+  });
+  $('#sheet', el).addEventListener('change', e => loadSheet(e.target.value));
+
+  function loadSheet(name) {
+    st.sheet = name;
+    st.rows = BOM.sheetRows(st.wb, name);
+    st.headerIdx = BOM.detectHeader(st.rows);
+    st.headers = st.rows[st.headerIdx] || [];
+    st.map = BOM.autoMap(st.headers);
+    rebuild();
+  }
+  function rebuild() {
+    st.items = BOM.buildItems(st.rows, st.headerIdx, st.map);
+    renderMapping();
+    renderPreview();
+  }
+
+  function renderMapping() {
+    const mp = $('#mapping', el);
+    if (!st.rows.length) { mp.innerHTML = '<div class="notice error">This sheet is empty.</div>'; return; }
+    const opts = (sel, filter) => `<option value="-1">— not in file —</option>` + st.headers.map((h, j) =>
+      (filter && !filter(h)) ? '' : `<option value="${j}" ${sel === j ? 'selected' : ''}>${esc(h || `(column ${j + 1})`)}</option>`).join('');
+    mp.innerHTML = `<div class="card">
+      <h3>Column mapping</h3>
+      <p class="muted small">Detected automatically from your header row. Change anything that is wrong.</p>
+      <div class="map-grid">
+        <label>Header row<input type="number" id="hdr" min="1" max="${st.rows.length}" value="${st.headerIdx + 1}"></label>
+        ${BOM.FIELDS.map(f => `<label>${esc(f.label)}${f.required ? ' <i>*</i>' : ''}
+          <select data-field="${f.key}" class="${f.required && st.map[f.key] < 0 ? 'missing' : ''}">${opts(st.map[f.key], f.key === 'qty' ? h => BOM.normHeader(h).includes('stock') : null)}</select></label>`).join('')}
+      </div>
+      ${st.map.qty < 0 ? `<div class="notice error">No <b>Stock Qty</b> column found in this sheet. Add a column named <b>Stock Qty</b> with the quantity you actually have, save the file and upload it again.</div>` : ''}
+    </div>`;
+    $('#hdr', mp).addEventListener('change', e => {
+      const n = Math.max(1, Math.min(st.rows.length, parseInt(e.target.value, 10) || 1));
+      st.headerIdx = n - 1; st.headers = st.rows[st.headerIdx] || []; st.map = BOM.autoMap(st.headers); rebuild();
+    });
+    $$('select[data-field]', mp).forEach(s => s.addEventListener('change', () => { st.map[s.dataset.field] = Number(s.value); rebuild(); }));
+  }
+
+  const CELLS = [['partNumber', 'Part Number', true], ['value', 'Value', true], ['package', 'Package / Size', true],
+    ['description', 'Description', true], ['manufacturer', 'Manufacturer'], ['category', 'Category'], ['qty', 'Stock Qty', true]];
+
+  function renderPreview() {
+    const pv = $('#preview', el);
+    if (!st.items.length) { pv.innerHTML = st.rows.length ? '<div class="notice">No data rows found below the header row.</div>' : ''; return; }
+    pv.innerHTML = `<div class="card">
+      <div class="preview-head">
+        <h3>Preview — nothing is saved until you click Import</h3>
+        <div id="pvSummary" class="summary"></div>
+        <div class="pv-tools">
+          <label class="chk"><input type="checkbox" id="onlyBad" ${st.onlyBad ? 'checked' : ''}> Show only rows with problems</label>
+          <button class="btn sm ghost" id="fillVal" type="button">Fill empty Value with Part Number</button>
+          <button class="btn primary" id="doImport" type="button">Import</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table class="tbl preview">
+        <thead><tr><th><input type="checkbox" id="allInc" checked title="Include all"></th><th>Row</th>
+          ${CELLS.map(([, l, r]) => `<th>${l}${r ? ' <i>*</i>' : ''}</th>`).join('')}<th>Status</th></tr></thead>
+        <tbody>${st.items.map((it, i) => `<tr data-i="${i}">
+          <td><input type="checkbox" class="inc" data-i="${i}" ${it.include ? 'checked' : ''}></td>
+          <td class="muted">${it.rowNo}</td>
+          ${CELLS.map(([k]) => `<td><input class="cell c-${k}" data-i="${i}" data-k="${k}" value="${esc(it[k])}" ${k === 'package' ? 'list="dl-packages"' : ''}${k === 'category' ? 'list="dl-categories"' : ''}></td>`).join('')}
+          <td class="status"></td></tr>`).join('')}</tbody>
+      </table></div></div>`;
+
+    const tbody = $('tbody', pv);
+    tbody.addEventListener('input', e => {
+      const t = e.target;
+      if (!t.classList.contains('cell')) return;
+      const it = st.items[Number(t.dataset.i)];
+      it[t.dataset.k] = t.value;
+      if (t.dataset.k === 'category') it.icType = t.value.trim() === 'IC' ? BOM.guessIcType(it.description) : '';
+      refreshAll();
+    });
+    tbody.addEventListener('change', e => {
+      if (!e.target.classList.contains('inc')) return;
+      st.items[Number(e.target.dataset.i)].include = e.target.checked;
+      refreshAll();
+    });
+    $('#allInc', pv).addEventListener('change', e => {
+      st.items.forEach(it => { it.include = e.target.checked; });
+      $$('.inc', pv).forEach(c => { c.checked = e.target.checked; });
+      refreshAll();
+    });
+    $('#onlyBad', pv).addEventListener('change', e => { st.onlyBad = e.target.checked; refreshAll(); });
+    $('#fillVal', pv).addEventListener('click', () => {
+      let n = 0;
+      st.items.forEach((it, i) => {
+        if (!String(it.value).trim() && String(it.partNumber).trim()) {
+          it.value = it.partNumber; n++;
+          const inp = $(`input.cell[data-i="${i}"][data-k="value"]`, pv);
+          if (inp) inp.value = it.value;
+        }
+      });
+      toast(n ? `Filled ${n} empty value(s)` : 'No empty values to fill');
+      refreshAll();
+    });
+    $('#doImport', pv).addEventListener('click', doImport);
+    refreshAll();
+  }
+
+  function itemProject(it) { return String(it.project || '').trim() || projInput.value.trim() || 'General'; }
+
+  function refreshAll() {
+    const pv = $('#preview', el);
+    if (!st.items.length || !$('tbody', pv)) return;
+    const mine = new Map(S.components.filter(c => c.ownerUid === myUid()).map(c => [keyOf(c.partNumber, c.project), c]));
+    const keyCount = new Map();
+    for (const it of st.items) {
+      if (!it.include || BOM.missingFields(it).length) continue;
+      const k = keyOf(it.partNumber, itemProject(it));
+      keyCount.set(k, (keyCount.get(k) || 0) + 1);
+    }
+    let ready = 0, bad = 0, excluded = 0, pcs = 0;
+    st.items.forEach((it, i) => {
+      const tr = $(`tr[data-i="${i}"]`, pv);
+      const miss = BOM.missingFields(it);
+      for (const [k, , req] of CELLS) {
+        const inp = $(`input.cell[data-k="${k}"]`, tr);
+        const isMissing = req && (k === 'qty' ? miss.includes('Stock Qty') : !String(it[k]).trim());
+        inp.classList.toggle('missing', isMissing);
+      }
+      let html;
+      if (!it.include) { html = '<span class="st muted">Excluded</span>'; excluded++; }
+      else if (miss.length) { html = `<span class="st bad">Missing: ${esc(miss.join(', '))}</span>`; bad++; }
+      else {
+        ready++; pcs += BOM.parseQty(it.qty);
+        const k = keyOf(it.partNumber, itemProject(it));
+        const ex = mine.get(k);
+        const notes = [];
+        if (ex) notes.push(`Adds to your existing stock (${ex.qty} now)`);
+        if ((keyCount.get(k) || 0) > 1) notes.push('Duplicate in file, will be combined');
+        html = notes.length ? `<span class="st info">${esc(notes.join(' · '))}</span>` : '<span class="st ok">Ready</span>';
+      }
+      $('.status', tr).innerHTML = html;
+      tr.classList.toggle('row-bad', it.include && miss.length > 0);
+      tr.classList.toggle('row-excluded', !it.include);
+      tr.classList.toggle('hidden', st.onlyBad && !(it.include && miss.length > 0));
+    });
+    $('#pvSummary', pv).innerHTML = `<b>${st.items.length}</b> rows · <span class="text-ok"><b>${ready}</b> ready (${pcs.toLocaleString()} pcs)</span>` +
+      (bad ? ` · <span class="text-bad"><b>${bad}</b> with missing fields (will be skipped unless fixed)</span>` : '') +
+      (excluded ? ` · <span class="muted">${excluded} excluded</span>` : '');
+    const btn = $('#doImport', pv);
+    if (!btn.dataset.busy) {
+      btn.disabled = !ready || st.map.qty < 0;
+      btn.textContent = st.map.qty < 0 ? 'Stock Qty column missing' : `Import ${ready} row${ready === 1 ? '' : 's'}`;
+    }
+  }
+
+  async function doImport() {
+    if (st.map.qty < 0) { toast('Your file needs a "Stock Qty" column.', 'error'); return; }
+    const readyItems = st.items.filter(it => it.include && !BOM.missingFields(it).length);
+    if (!readyItems.length) { toast('No valid rows to import.', 'error'); return; }
+    if (!projInput.value.trim() && readyItems.some(it => !String(it.project || '').trim())) {
+      toast('Enter a project name.', 'error'); projInput.focus(); return;
+    }
+    const groups = new Map();
+    for (const it of readyItems) {
+      const project = itemProject(it);
+      const k = keyOf(it.partNumber, project);
+      const q = BOM.parseQty(it.qty);
+      if (groups.has(k)) groups.get(k).qty += q;
+      else groups.set(k, {
+        partNumber: it.partNumber.trim(), value: String(it.value).trim(), package: String(it.package).trim(),
+        description: String(it.description).trim(), manufacturer: String(it.manufacturer || '').trim(),
+        category: String(it.category || '').trim(), icType: it.icType || '', project, qty: q,
+      });
+    }
+    const list = [...groups.values()];
+    const mine = new Map(S.components.filter(c => c.ownerUid === myUid()).map(c => [keyOf(c.partNumber, c.project), c]));
+    const merges = list.filter(x => mine.has(keyOf(x.partNumber, x.project))).length;
+    const totalQty = list.reduce((s, x) => s + x.qty, 0);
+    const skipped = st.items.filter(it => it.include).length - readyItems.length;
+    const projects = uniqSorted(list.map(x => x.project));
+    const ok = await confirmDialog('Import components',
+      `Add <b>${list.length}</b> components (<b>${totalQty.toLocaleString()}</b> pcs) to project <b>${esc(projects.join(', '))}</b>?` +
+      (merges ? `<br>${merges} of them already exist in your inventory. Their quantity will be increased.` : '') +
+      (skipped ? `<br><span class="text-bad">${skipped} row(s) with missing fields will be skipped.</span>` : ''),
+      'Import');
+    if (!ok) return;
+
+    const btn = $('#doImport', el);
+    btn.dataset.busy = '1'; btn.disabled = true;
+    try {
+      const src = await resolveSource(readSource($('#importSetup', el)));
+      const CHUNK = 200;
+      for (let i = 0; i < list.length; i += CHUNK) {
+        btn.textContent = `Importing… ${i}/${list.length}`;
+        const batch = writeBatch(db);
+        for (const x of list.slice(i, i + CHUNK)) {
+          const ex = mine.get(keyOf(x.partNumber, x.project));
+          let ref;
+          if (ex) {
+            ref = doc(db, 'components', ex.id);
+            batch.update(ref, { qty: increment(x.qty), lastAddedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+          } else {
+            ref = doc(collection(db, 'components'));
+            batch.set(ref, newComponentDoc(x, src));
+          }
+          batch.set(doc(collection(db, 'transactions')), {
+            componentId: ref.id, partNumber: x.partNumber, type: 'import', delta: x.qty, toName: '',
+            note: `BOM: ${st.fileName}`, byUid: myUid(), byName: S.profile.name, createdAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+      await addDoc(collection(db, 'activity'), {
+        type: 'bom', byUid: myUid(), byName: S.profile.name, count: list.length, totalQty,
+        project: projects.join(', '), fileName: st.fileName, createdAt: serverTimestamp(),
+      });
+      S.ui.lastSource = { sourceType: src.sourceType, sourceName: src.sourceName, vendorId: src.vendorId };
+      toast(`Imported ${list.length} components (${totalQty} pcs)`, 'success', 5000);
+      S.ui.my = { proj: projects.length === 1 ? projects[0] : '', q: '' };
+      location.hash = '#my';
+    } catch (err) {
+      console.error(err);
+      toast('Import failed: ' + err.message, 'error', 8000);
+      delete btn.dataset.busy;
+      refreshAll();
+    }
+  }
+
+  return () => refreshAll(); // live data changes only affect "adds to existing" hints
+}
+
+// ---------------------------------------------------------------------
+//  Component actions (details / request / take / edit)
+// ---------------------------------------------------------------------
+const kv = (label, val, raw = false) =>
+  `<div class="kv"><span>${esc(label)}</span><div>${raw ? val : esc(val || '—')}</div></div>`;
+
+async function showDetails(c) {
+  if (!c) { toast('This component no longer exists.', 'error'); return; }
+  const v = c.sourceType === 'vendor' && c.vendorId ? S.vendors.find(x => x.id === c.vendorId) : null;
+  const mine = c.ownerUid === myUid();
+  const actions = [];
+  if (!S.isAdmin && !mine && c.qty > 0) actions.push({ label: 'Request this part', cls: 'primary', onClick: () => { setTimeout(() => showRequestModal(c)); } });
+  if (mine && c.qty > 0) actions.push({ label: 'Mark taken', onClick: () => { setTimeout(() => showTakeModal(c)); } });
+  if (mine) actions.push({ label: 'Edit', onClick: () => { setTimeout(() => showEditModal(c)); } });
+  actions.push({ label: 'Close', cls: 'ghost' });
+  const m = openModal({
+    title: c.partNumber, wide: true, actions,
+    body: `<div class="detail-grid">
+      ${kv('Part Number', c.partNumber)}${kv('Value', c.value)}
+      ${kv('Package / Size', c.package)}${kv('Category', [c.category, c.icType].filter(Boolean).join(' — '))}
+      ${kv('Manufacturer', c.manufacturer)}${kv('Remaining qty', `<span class="qty ${qtyClass(c.qty)}">${c.qty}</span>`, true)}
+      ${kv('Held by', c.ownerName)}${kv('Project', c.project)}
+      ${kv('Source', sourceLabel(c))}${v ? kv('Vendor contact', [v.contact, v.phone, v.email].filter(Boolean).join(' · ')) : ''}
+      ${kv('First added', fmtDateTime(c.createdAt))}${kv('Last updated', fmtDateTime(c.updatedAt))}
+      <div class="kv span2"><span>Description</span><div>${esc(c.description)}</div></div>
+    </div>
+    <h4>History</h4><div id="hist" class="muted small">Loading…</div>`,
+  });
+  try {
+    const qs = await getDocs(query(collection(db, 'transactions'), where('componentId', '==', c.id)));
+    const rows = qs.docs.map(d => d.data()).sort((a, b) => (toDate(b.createdAt) || 0) - (toDate(a.createdAt) || 0));
+    const h = $('#hist', m.el);
+    if (!h) return;
+    h.className = '';
+    h.innerHTML = rows.length ? `<div class="table-wrap"><table class="tbl compact"><thead><tr><th>When</th><th>Action</th><th class="num">Qty</th><th>By</th><th>To / note</th></tr></thead><tbody>
+      ${rows.map(t => `<tr><td class="nowrap">${esc(fmtDateTime(t.createdAt))}</td><td>${esc(TX_LABEL[t.type] || t.type)}</td>
+        <td class="num ${t.delta < 0 ? 'text-bad' : 'text-ok'}">${t.delta > 0 ? '+' : ''}${t.delta}</td><td>${esc(t.byName)}</td>
+        <td>${esc([t.toName, t.note].filter(Boolean).join(' — '))}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">No history yet.</p>';
+  } catch (e) {
+    console.error(e);
+    const h = $('#hist', m.el); if (h) h.textContent = 'Could not load history.';
+  }
+}
+
+function showRequestModal(c) {
+  if (!c) return;
+  openModal({
+    title: `Request ${c.partNumber}`,
+    body: `<p class="muted">${esc(c.value)} · ${esc(c.package)} · ${esc(c.description)}</p>
+      <p>Held by <b>${esc(c.ownerName)}</b> (project <b>${esc(c.project)}</b>). Available now: <b>${c.qty}</b></p>
+      <div class="grid">
+        <label>Quantity needed <i>*</i><input name="qty" type="number" min="1" max="${c.qty}" value="1"></label>
+        <label>For project / purpose<input name="purpose" list="dl-projects"></label>
+        <label class="span2">Note to ${esc(c.ownerName)}<textarea name="note" rows="2" placeholder="Optional"></textarea></label>
+      </div>`,
+    actions: [{ label: 'Cancel', cls: 'ghost' }, {
+      label: 'Send request', cls: 'primary', onClick: async m => {
+        const q = parseInt(m.querySelector('[name=qty]').value, 10);
+        if (!(q > 0)) { toast('Enter a quantity.', 'error'); return false; }
+        const cur = findComp(c.id);
+        if (!cur || q > cur.qty) { toast(`Only ${cur ? cur.qty : 0} available.`, 'error'); return false; }
+        await addDoc(collection(db, 'requests'), {
+          componentId: c.id, partNumber: c.partNumber, value: c.value, package: c.package, description: c.description,
+          project: c.project, requesterUid: myUid(), requesterName: S.profile.name, ownerUid: c.ownerUid, ownerName: c.ownerName,
+          qtyRequested: q, qtyApproved: 0, purpose: m.querySelector('[name=purpose]').value.trim(),
+          note: m.querySelector('[name=note]').value.trim(), ownerNote: '', status: 'pending', createdAt: serverTimestamp(),
+        });
+        toast(`Request sent to ${c.ownerName}. You'll be notified when they respond.`, 'success', 5000);
+      },
+    }],
+  });
+}
+
+function showTakeModal(c) {
+  if (!c) return;
+  const others = S.users.filter(u => u.active && u.role !== 'admin' && u.id !== myUid());
+  openModal({
+    title: `Mark taken: ${c.partNumber}`,
+    body: `<p class="muted">${esc(c.value)} · ${esc(c.package)} · ${esc(c.description)}</p><p>In stock: <b>${c.qty}</b></p>
+      <div class="grid">
+        <label>Quantity taken <i>*</i><input name="qty" type="number" min="1" max="${c.qty}" value="1"></label>
+        <label>Taken by<select name="to"><option value="">Me (${esc(S.profile.name)})</option>${others.map(u => `<option>${esc(u.name)}</option>`).join('')}</select></label>
+        <label class="span2">Purpose / note<input name="note" placeholder="e.g. Used on proto board #3"></label>
+      </div>`,
+    actions: [{ label: 'Cancel', cls: 'ghost' }, {
+      label: 'Deduct from stock', cls: 'primary', onClick: async m => {
+        const q = parseInt(m.querySelector('[name=qty]').value, 10);
+        if (!(q > 0)) { toast('Enter a quantity.', 'error'); return false; }
+        const toName = m.querySelector('[name=to]').value || S.profile.name;
+        const note = m.querySelector('[name=note]').value.trim();
+        await runTransaction(db, async tx => {
+          const ref = doc(db, 'components', c.id);
+          const snap = await tx.get(ref);
+          if (!snap.exists()) throw new Error('Component no longer exists.');
+          const cur = Number(snap.data().qty) || 0;
+          if (q > cur) throw new Error(`Only ${cur} in stock.`);
+          tx.update(ref, { qty: cur - q, updatedAt: serverTimestamp() });
+          tx.set(doc(collection(db, 'transactions')), {
+            componentId: c.id, partNumber: c.partNumber, type: 'taken', delta: -q, qtyAfter: cur - q, toName, note,
+            byUid: myUid(), byName: S.profile.name, createdAt: serverTimestamp(),
+          });
+        });
+        toast(`Deducted ${q}. ${c.qty - q} left.`, 'success');
+      },
+    }],
+  });
+}
+
+function showEditModal(c) {
+  if (!c) return;
+  openModal({
+    title: `Edit ${c.partNumber}`, wide: true,
+    body: `<form class="form" novalidate>${componentFields(c, true)}${sourceFields(c)}</form>`,
+    onOpen: m => { const f = m.querySelector('form'); wireComponentForm(f); wireSource(f); },
+    actions: [
+      { label: 'Delete', cls: 'danger left', onClick: async () => {
+        const ok = await confirmDialog('Delete component', `Delete <b>${esc(c.partNumber)}</b> (${c.qty} pcs) from your inventory? This cannot be undone.`, 'Delete', true);
+        if (!ok) return false;
+        await deleteDoc(doc(db, 'components', c.id));
+        toast('Component deleted.', 'success');
+      } },
+      { label: 'Cancel', cls: 'ghost' },
+      { label: 'Save changes', cls: 'primary', onClick: async m => {
+        const f = m.querySelector('form');
+        const d = readComponentForm(f);
+        const err = validateComp(d);
+        if (err) { toast(err, 'error'); return false; }
+        const src = await resolveSource(readSource(f));
+        const cur = findComp(c.id) || c;
+        const delta = d.qty - cur.qty;
+        await updateDoc(doc(db, 'components', c.id), {
+          partNumber: d.partNumber, value: d.value, package: d.package, description: d.description,
+          category: d.category, icType: d.icType, manufacturer: d.manufacturer, qty: d.qty, project: d.project,
+          ...src, updatedAt: serverTimestamp(), ...(delta > 0 ? { lastAddedAt: serverTimestamp() } : {}),
+        });
+        if (delta !== 0) await logTx({ componentId: c.id, partNumber: d.partNumber, type: delta > 0 ? 'restock' : 'adjust', delta, qtyAfter: d.qty, note: 'Edited' });
+        toast('Saved.', 'success');
+      } },
+    ],
+  });
+}
+
+// ---------------------------------------------------------------------
+//  Requests
+// ---------------------------------------------------------------------
+function renderRequests(el) {
+  const st = S.ui.req ||= { tab: 'in' };
+  el.innerHTML = `
+    <div class="tabs">
+      <button data-tab="in">Requests to me <b class="count accent" id="cIn"></b></button>
+      <button data-tab="out">My requests</button>
+    </div>
+    <p class="intro" id="reqIntro"></p>
+    <div id="results"></div>`;
+  $('.tabs', el).addEventListener('click', e => {
+    const b = e.target.closest('[data-tab]');
+    if (!b) return;
+    st.tab = b.dataset.tab; update();
+  });
+  const order = { pending: 0, approved: 1, rejected: 2, cancelled: 3 };
+  const update = () => {
+    $$('.tabs button', el).forEach(b => b.classList.toggle('active', b.dataset.tab === st.tab));
+    const pend = S.reqIn.filter(r => r.status === 'pending').length;
+    $('#cIn', el).textContent = pend || '';
+    $('#reqIntro', el).innerHTML = st.tab === 'in'
+      ? 'Engineers asking for components you hold. Approving deducts the approved quantity from your stock.'
+      : 'Components you asked other engineers for.';
+    const list = (st.tab === 'in' ? S.reqIn : S.reqOut).slice()
+      .sort((a, b) => (order[a.status] - order[b.status]) || ((toDate(b.createdAt) || 0) - (toDate(a.createdAt) || 0)));
+    if (!list.length) { $('#results', el).innerHTML = `<div class="empty">${st.tab === 'in' ? 'No one has requested parts from you yet.' : 'You have not requested any parts. Find a part in <a href="#search">Search</a> and click Request.'}</div>`; return; }
+    $('#results', el).innerHTML = `<div class="req-list">${list.map(r => {
+      const c = findComp(r.componentId);
+      const who = st.tab === 'in' ? `From <b>${esc(r.requesterName)}</b>` : `To <b>${esc(r.ownerName)}</b>`;
+      let acts = '';
+      if (r.status === 'pending' && st.tab === 'in') acts = `<button class="btn sm primary" data-action="approve" data-id="${r.id}">Approve</button><button class="btn sm ghost" data-action="reject" data-id="${r.id}">Reject</button>`;
+      if (r.status === 'pending' && st.tab === 'out') acts = `<button class="btn sm ghost" data-action="cancelReq" data-id="${r.id}">Cancel request</button>`;
+      return `<div class="req card ${r.status}">
+        <div class="req-main">
+          <div class="req-title"><span class="mono strong">${esc(r.partNumber)}</span> <span class="badge ${r.status}">${esc(r.status)}</span></div>
+          <div class="muted">${esc(r.value)} · ${esc(r.package)} · ${esc(r.description)}</div>
+          <div>${who} · requested <b>${r.qtyRequested}</b>${r.status === 'approved' ? ` · approved <b>${r.qtyApproved}</b>` : ''}${r.purpose ? ` · for <b>${esc(r.purpose)}</b>` : ''}
+            ${st.tab === 'in' && r.status === 'pending' ? ` · you have <b class="${c && c.qty >= r.qtyRequested ? 'text-ok' : 'text-bad'}">${c ? c.qty : 'deleted'}</b>` : ''}</div>
+          ${r.note ? `<div class="note">“${esc(r.note)}”</div>` : ''}
+          ${r.ownerNote ? `<div class="note owner">${esc(r.ownerName)}: “${esc(r.ownerNote)}”</div>` : ''}
+          <div class="muted small">${esc(fmtDateTime(r.createdAt))}${r.decidedAt ? ` · ${esc(r.status)} ${esc(fmtDateTime(r.decidedAt))}` : ''}</div>
+        </div>
+        <div class="req-actions">${acts}</div>
+      </div>`;
+    }).join('')}</div>`;
+  };
+  update();
+  return update;
+}
+
+function showApproveModal(r) {
+  if (!r) return;
+  const c = findComp(r.componentId);
+  if (!c) { toast('That component was deleted. Reject the request instead.', 'error'); return; }
+  const def = Math.min(r.qtyRequested, c.qty);
+  openModal({
+    title: 'Approve request',
+    body: `<p><b>${esc(r.requesterName)}</b> requested <b>${r.qtyRequested}</b> × <span class="mono">${esc(r.partNumber)}</span> (${esc(r.value)} ${esc(r.package)}).</p>
+      <p>You have <b>${c.qty}</b> in stock (project ${esc(c.project)}).</p>
+      ${r.note ? `<p class="note">“${esc(r.note)}”</p>` : ''}
+      <div class="grid">
+        <label>Quantity to give <i>*</i><input name="qty" type="number" min="1" max="${c.qty}" value="${def}"></label>
+        <label class="span2">Note to ${esc(r.requesterName)}<input name="note" placeholder="Optional, e.g. collect from my desk"></label>
+      </div>`,
+    actions: [{ label: 'Cancel', cls: 'ghost' }, {
+      label: 'Approve & deduct', cls: 'primary', onClick: async m => {
+        const q = parseInt(m.querySelector('[name=qty]').value, 10);
+        if (!(q > 0)) { toast('Enter a quantity.', 'error'); return false; }
+        const note = m.querySelector('[name=note]').value.trim();
+        await runTransaction(db, async tx => {
+          const cRef = doc(db, 'components', r.componentId);
+          const rRef = doc(db, 'requests', r.id);
+          const [cs, rs] = [await tx.get(cRef), await tx.get(rRef)];
+          if (!cs.exists()) throw new Error('Component no longer exists.');
+          if (rs.data()?.status !== 'pending') throw new Error('This request was already handled or cancelled.');
+          const cur = Number(cs.data().qty) || 0;
+          if (q > cur) throw new Error(`You only have ${cur}.`);
+          tx.update(cRef, { qty: cur - q, updatedAt: serverTimestamp() });
+          tx.update(rRef, { status: 'approved', qtyApproved: q, ownerNote: note, decidedAt: serverTimestamp() });
+          tx.set(doc(collection(db, 'transactions')), {
+            componentId: r.componentId, partNumber: r.partNumber, type: 'request', delta: -q, qtyAfter: cur - q,
+            toName: r.requesterName, note, byUid: myUid(), byName: S.profile.name, createdAt: serverTimestamp(),
+          });
+        });
+        toast(`Approved ${q} for ${r.requesterName}. ${c.qty - q} left.`, 'success');
+      },
+    }],
+  });
+}
+
+function showRejectModal(r) {
+  if (!r) return;
+  openModal({
+    title: 'Reject request',
+    body: `<p>Reject <b>${esc(r.requesterName)}</b>'s request for ${r.qtyRequested} × <span class="mono">${esc(r.partNumber)}</span>?</p>
+      <label>Reason (optional)<input name="note" placeholder="e.g. Reserved for project X"></label>`,
+    actions: [{ label: 'Cancel', cls: 'ghost' }, {
+      label: 'Reject', cls: 'danger', onClick: async m => {
+        await updateDoc(doc(db, 'requests', r.id), { status: 'rejected', ownerNote: m.querySelector('[name=note]').value.trim(), decidedAt: serverTimestamp() });
+        toast('Request rejected.');
+      },
+    }],
+  });
+}
+
+async function cancelRequest(r) {
+  if (!r) return;
+  if (!await confirmDialog('Cancel request', `Cancel your request for <b>${esc(r.partNumber)}</b>?`, 'Cancel request', true)) return;
+  await updateDoc(doc(db, 'requests', r.id), { status: 'cancelled', decidedAt: serverTimestamp() });
+  toast('Request cancelled.');
+}
+
+// ---------------------------------------------------------------------
+//  Vendors
+// ---------------------------------------------------------------------
+function renderVendors(el) {
+  const st = S.ui.vendors ||= { q: '' };
+  el.innerHTML = `
+    <div class="toolbar">
+      <input id="q" class="search" type="search" autocomplete="off" placeholder="Search vendors by name, contact, phone, email…" value="${esc(st.q)}">
+      <button class="btn primary" id="addV" type="button">+ Add vendor</button>
+    </div>
+    <div id="results"></div>`;
+  $('#addV', el).onclick = () => showVendorModal(null);
+  const update = () => {
+    const t = st.q.trim().toLowerCase();
+    const list = S.vendors.filter(v => !t || [v.name, v.contact, v.phone, v.email, v.notes].some(x => String(x || '').toLowerCase().includes(t)));
+    const used = id => S.components.filter(c => c.vendorId === id).length;
+    $('#results', el).innerHTML = list.length ? `<div class="table-wrap"><table class="tbl"><thead><tr>
+        <th>Vendor</th><th>Contact person</th><th>Phone</th><th>Email</th><th>Notes</th><th class="num">Components</th><th>Added by</th><th></th></tr></thead>
+      <tbody>${list.map(v => `<tr>
+        <td class="strong">${esc(v.name)}</td><td>${esc(v.contact)}</td>
+        <td>${v.phone ? `<a href="tel:${esc(v.phone)}">${esc(v.phone)}</a>` : ''}</td>
+        <td>${v.email ? `<a href="mailto:${esc(v.email)}">${esc(v.email)}</a>` : ''}</td>
+        <td class="desc">${esc(v.notes)}</td><td class="num">${used(v.id)}</td><td>${esc(v.createdByName)}</td>
+        <td class="actions"><button class="btn sm" data-action="editVendor" data-id="${v.id}">Edit</button>
+          ${v.createdBy === myUid() || S.isAdmin ? `<button class="btn sm ghost" data-action="deleteVendor" data-id="${v.id}">Delete</button>` : ''}</td>
+      </tr>`).join('')}</tbody></table></div>`
+      : `<div class="empty">${S.vendors.length ? 'No matching vendors.' : 'No vendors saved yet. Vendors are also saved automatically when you add a component bought from a vendor.'}</div>`;
+  };
+  const q = $('#q', el);
+  q.addEventListener('input', debounce(() => { st.q = q.value; update(); }, 120));
+  update();
+  return update;
+}
+
+function showVendorModal(v) {
+  openModal({
+    title: v ? `Edit vendor: ${v.name}` : 'Add vendor',
+    body: `<div class="grid">
+      <label>Vendor name <i>*</i><input name="name" value="${esc(v?.name)}"></label>
+      <label>Contact person<input name="contact" value="${esc(v?.contact)}"></label>
+      <label>Phone<input name="phone" value="${esc(v?.phone)}"></label>
+      <label>Email<input name="email" type="email" value="${esc(v?.email)}"></label>
+      <label class="span2">Address / notes<textarea name="notes" rows="2">${esc(v?.notes)}</textarea></label></div>`,
+    actions: [{ label: 'Cancel', cls: 'ghost' }, {
+      label: 'Save', cls: 'primary', onClick: async m => {
+        const g = k => m.querySelector(`[name=${k}]`).value.trim();
+        const data = { name: g('name'), contact: g('contact'), phone: g('phone'), email: g('email'), notes: g('notes') };
+        if (!data.name) { toast('Vendor name is required.', 'error'); return false; }
+        const dup = S.vendors.find(x => x.name.toLowerCase() === data.name.toLowerCase() && x.id !== v?.id);
+        if (dup) { toast('A vendor with this name already exists.', 'error'); return false; }
+        if (v) await updateDoc(doc(db, 'vendors', v.id), { ...data, updatedAt: serverTimestamp() });
+        else await addDoc(collection(db, 'vendors'), { ...data, createdBy: myUid(), createdByName: S.profile.name, createdAt: serverTimestamp() });
+        toast('Vendor saved.', 'success');
+      },
+    }],
+  });
+}
+
+// ---------------------------------------------------------------------
+//  Admin: manage engineers
+// ---------------------------------------------------------------------
+function genPass() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const a = crypto.getRandomValues(new Uint32Array(10));
+  return 'Riod-' + [...a].map(n => chars[n % chars.length]).join('');
+}
+
+function renderAdmin(el) {
+  el.innerHTML = `
+    <div class="card form">
+      <h3>Add engineer</h3>
+      <form id="addEng" novalidate>
+        <div class="grid">
+          <label>Full name <i>*</i><input name="name" placeholder="e.g. Arjun Menon"></label>
+          <label>Company email <i>*</i><span class="email-input"><input name="local" placeholder="name" autocomplete="off"><span>@${esc(COMPANY_DOMAIN)}</span></span></label>
+          <label>Temporary password <i>*</i><input name="pass" value="${genPass()}"></label>
+        </div>
+        <div class="form-actions"><button class="btn primary" type="submit">Add engineer</button></div>
+      </form>
+      <p class="muted small">Give the engineer their email and temporary password. They can change it from the menu (top right) after signing in, or use "Forgot password" on the login page.</p>
+    </div>
+    <div class="card"><h3>Engineers</h3><div id="results"></div></div>`;
+
+  const form = $('#addEng', el);
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const name = form.querySelector("[name=name]").value.trim();
+    let local = form.querySelector("[name=local]").value.trim().toLowerCase();
+    if (local.includes('@')) {
+      if (!local.endsWith('@' + COMPANY_DOMAIN)) { toast(`Email must end with @${COMPANY_DOMAIN}`, 'error'); return; }
+      local = local.split('@')[0];
+    }
+    const pass = form.querySelector("[name=pass]").value;
+    if (!name || !local) { toast('Name and email are required.', 'error'); return; }
+    if (!/^[a-z0-9._%+-]+$/.test(local)) { toast('Email has invalid characters.', 'error'); return; }
+    if (pass.length < 6) { toast('Password must be at least 6 characters.', 'error'); return; }
+    const email = `${local}@${COMPANY_DOMAIN}`;
+    if (email === ADMIN_EMAIL) { toast('That is the admin email.', 'error'); return; }
+    const existing = S.users.find(u => (u.email || '').toLowerCase() === email);
+    if (existing) {
+      if (existing.active) toast(`${email} is already an engineer.`, 'error');
+      else if (await confirmDialog('Reactivate engineer', `${esc(email)} was removed earlier. Reactivate their account? (Their old password still works.)`, 'Reactivate'))
+        await updateDoc(doc(db, 'users', existing.id), { active: true, name, reactivatedAt: serverTimestamp() });
+      return;
+    }
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true; btn.textContent = 'Adding…';
+    try {
+      const uid = await createAuthUser(email, pass);
+      await setDoc(doc(db, 'users', uid), { name, email, role: 'engineer', active: true, createdAt: serverTimestamp(), createdBy: myUid() });
+      openModal({
+        title: 'Engineer added',
+        body: `<p>Send these login details to <b>${esc(name)}</b>:</p>
+          <div class="cred"><div><span>Website</span><b>${esc(location.origin + location.pathname)}</b></div><div><span>Email</span><b>${esc(email)}</b></div><div><span>Temporary password</span><b>${esc(pass)}</b></div></div>`,
+        actions: [{ label: 'Copy details', onClick: async () => {
+          await navigator.clipboard.writeText(`Riod Inventory\nWebsite: ${location.origin + location.pathname}\nEmail: ${email}\nTemporary password: ${pass}`);
+          toast('Copied.', 'success'); return false;
+        } }, { label: 'Done', cls: 'primary' }],
+      });
+      form.reset(); form.querySelector("[name=pass]").value = genPass();
+    } catch (err) {
+      console.error(err);
+      if (err.code === 'auth/email-already-in-use')
+        toast('This email already has a login in Firebase but no engineer record. Delete it in Firebase Console → Authentication → Users, then add again.', 'error', 9000);
+      else if (err.code === 'auth/weak-password') toast('Password is too weak (min 6 characters).', 'error');
+      else toast(err.message, 'error', 6000);
+    } finally { btn.disabled = false; btn.textContent = 'Add engineer'; }
+  });
+
+  const update = () => {
+    const list = S.users.filter(u => u.role !== 'admin').sort((a, b) => (b.active === true) - (a.active === true) || (a.name || '').localeCompare(b.name || ''));
+    const count = id => S.components.filter(c => c.ownerUid === id).length;
+    $('#results', el).innerHTML = list.length ? `<div class="table-wrap"><table class="tbl"><thead><tr>
+      <th>Name</th><th>Email</th><th>Status</th><th class="num">Components</th><th>Added</th><th>Last login</th><th></th></tr></thead>
+      <tbody>${list.map(u => `<tr class="${u.active ? '' : 'row-excluded'}">
+        <td class="strong">${esc(u.name)}</td><td>${esc(u.email)}</td>
+        <td>${u.active ? '<span class="badge approved">active</span>' : '<span class="badge cancelled">removed</span>'}</td>
+        <td class="num">${count(u.id)}</td><td>${esc(fmtDate(u.createdAt))}</td><td>${esc(u.lastLogin ? timeAgo(u.lastLogin) : 'never')}</td>
+        <td class="actions">${u.active
+          ? `<button class="btn sm danger" data-action="removeEng" data-id="${u.id}">Remove</button>`
+          : `<button class="btn sm" data-action="reactivateEng" data-id="${u.id}">Reactivate</button>`}</td>
+      </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No engineers yet. Add the first one above.</div>';
+  };
+  update();
+  return update;
+}
+
+// ---------------------------------------------------------------------
+//  Change password
+// ---------------------------------------------------------------------
+function showPasswordModal() {
+  openModal({
+    title: 'Change password',
+    body: `<div class="grid one">
+      <label>Current password<input name="cur" type="password" autocomplete="current-password"></label>
+      <label>New password (min 6 characters)<input name="n1" type="password" autocomplete="new-password"></label>
+      <label>Confirm new password<input name="n2" type="password" autocomplete="new-password"></label></div>`,
+    actions: [{ label: 'Cancel', cls: 'ghost' }, {
+      label: 'Change password', cls: 'primary', onClick: async m => {
+        const g = k => m.querySelector(`[name=${k}]`).value;
+        if (g('n1').length < 6) { toast('New password must be at least 6 characters.', 'error'); return false; }
+        if (g('n1') !== g('n2')) { toast('New passwords do not match.', 'error'); return false; }
+        try {
+          const u = auth.currentUser;
+          await reauthenticateWithCredential(u, EmailAuthProvider.credential(u.email, g('cur')));
+          await updatePassword(u, g('n1'));
+          toast('Password changed.', 'success');
+        } catch (e) { toast(friendlyAuthError(e), 'error'); return false; }
+      },
+    }],
+  });
+}
+
+// ---------------------------------------------------------------------
+//  Action dispatcher for buttons in the main view
+// ---------------------------------------------------------------------
+const reqById = id => S.reqIn.find(r => r.id === id) || S.reqOut.find(r => r.id === id);
+const ACTIONS = {
+  details: id => showDetails(findComp(id)),
+  request: id => showRequestModal(findComp(id)),
+  take: id => showTakeModal(findComp(id)),
+  edit: id => showEditModal(findComp(id)),
+  approve: id => showApproveModal(reqById(id)),
+  reject: id => showRejectModal(reqById(id)),
+  cancelReq: id => cancelRequest(reqById(id)).catch(e => toast(e.message, 'error')),
+  editVendor: id => showVendorModal(S.vendors.find(v => v.id === id)),
+  deleteVendor: async id => {
+    const v = S.vendors.find(x => x.id === id);
+    if (!v || !await confirmDialog('Delete vendor', `Delete vendor <b>${esc(v.name)}</b>? Components keep the vendor name.`, 'Delete', true)) return;
+    try { await deleteDoc(doc(db, 'vendors', id)); toast('Vendor deleted.'); } catch (e) { toast(e.message, 'error'); }
+  },
+  removeEng: async id => {
+    const u = S.users.find(x => x.id === id);
+    if (!u || !await confirmDialog('Remove engineer', `Remove <b>${esc(u.name)}</b> (${esc(u.email)})?<br>They will no longer be able to sign in. Their components stay in the inventory under their name.`, 'Remove', true)) return;
+    try { await updateDoc(doc(db, 'users', id), { active: false, removedAt: serverTimestamp() }); toast(`${u.name} removed.`); } catch (e) { toast(e.message, 'error'); }
+  },
+  reactivateEng: async id => {
+    const u = S.users.find(x => x.id === id);
+    if (!u) return;
+    try { await updateDoc(doc(db, 'users', id), { active: true, reactivatedAt: serverTimestamp() }); toast(`${u.name} reactivated.`, 'success'); } catch (e) { toast(e.message, 'error'); }
+  },
+};
+
+init();

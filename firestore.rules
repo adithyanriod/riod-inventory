@@ -1,0 +1,91 @@
+rules_version = '2';
+
+// Riod Inventory — Firestore security rules.
+// Paste this into Firebase console -> Firestore Database -> Rules -> Publish.
+//
+// Who can do what:
+//  * Only signed-in @riodlogic.com accounts that the admin has added (users/{uid}.active == true),
+//    plus admin@riodlogic.com, can read or write anything.
+//  * Engineers can only change / delete components they own.
+//  * Only the admin can add or remove engineers.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn()   { return request.auth != null && request.auth.token.email != null; }
+    function myEmail()    { return request.auth.token.email.lower(); }
+    function isCompany()  { return signedIn() && myEmail().matches('^[a-z0-9._%+-]+@riodlogic[.]com$'); }
+    function isAdmin()    { return isCompany() && myEmail() == 'admin@riodlogic.com'; }
+    function userPath()   { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function isEngineer() { return isCompany() && exists(userPath()) && get(userPath()).data.active == true; }
+    function isMember()   { return isAdmin() || isEngineer(); }
+    function me()         { return request.auth.uid; }
+
+    function str(s, max)  { return s is string && s.size() > 0 && s.size() <= max; }
+    function validComponent(d) {
+      return str(d.partNumber, 200) && str(d.value, 200) && str(d.package, 200) && str(d.description, 500)
+        && d.qty is int && d.qty >= 0 && d.qty <= 100000000
+        && d.ownerUid is string;
+    }
+
+    // ---- Engineers (admin managed) ----
+    match /users/{uid} {
+      allow read: if isMember() || (signedIn() && me() == uid);
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isEngineer() && me() == uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'lastLogin']));
+    }
+
+    // ---- Components ----
+    match /components/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && request.resource.data.ownerUid == me() && validComponent(request.resource.data);
+      allow update: if isMember() && resource.data.ownerUid == me()
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && validComponent(request.resource.data);
+      allow delete: if isMember() && (resource.data.ownerUid == me() || isAdmin());
+    }
+
+    // ---- Requests between engineers ----
+    match /requests/{id} {
+      allow read: if isMember()
+        && (isAdmin() || resource.data.requesterUid == me() || resource.data.ownerUid == me());
+      allow create: if isEngineer()
+        && request.resource.data.requesterUid == me()
+        && request.resource.data.ownerUid != me()
+        && request.resource.data.status == 'pending'
+        && request.resource.data.qtyRequested is int && request.resource.data.qtyRequested > 0;
+      allow update: if isEngineer()
+        && request.resource.data.requesterUid == resource.data.requesterUid
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.componentId == resource.data.componentId
+        && resource.data.status == 'pending'
+        && ( (resource.data.ownerUid == me() && request.resource.data.status in ['approved', 'rejected'])
+          || (resource.data.requesterUid == me() && request.resource.data.status == 'cancelled') );
+      allow delete: if isAdmin();
+    }
+
+    // ---- Vendors (shared directory) ----
+    match /vendors/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && str(request.resource.data.name, 200) && request.resource.data.createdBy == me();
+      allow update: if isMember() && str(request.resource.data.name, 200)
+        && request.resource.data.createdBy == resource.data.createdBy;
+      allow delete: if isMember() && (resource.data.createdBy == me() || isAdmin());
+    }
+
+    // ---- Activity feed (drives "new component" notifications) ----
+    match /activity/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && request.resource.data.byUid == me();
+      allow delete: if isAdmin();
+    }
+
+    // ---- Stock history log (append-only) ----
+    match /transactions/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && request.resource.data.byUid == me();
+    }
+  }
+}

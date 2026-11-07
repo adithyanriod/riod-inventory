@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Riod Inventory</title>
+  <meta name="description" content="Electronic component inventory for Riod Logic R&D">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div id="boot" class="boot"><div class="spinner"></div></div>
+
+  <!-- Login -->
+  <section id="login" class="login hidden">
+    <form id="loginForm" class="login-card" novalidate>
+      <div class="brand">
+        <img src="assets/icon.svg" alt="" width="44" height="44">
+        <div><h1>Riod Inventory</h1><p>Component inventory · Riod Logic R&amp;D</p></div>
+      </div>
+      <label>Company email<input type="email" name="email" placeholder="name@riodlogic.com" autocomplete="username" required></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+      <div id="loginMsg" class="form-msg"></div>
+      <button class="btn primary block" type="submit">Sign in</button>
+      <button class="link" type="button" id="forgot">Forgot password?</button>
+      <p class="muted small center">Only @riodlogic.com accounts created by the admin can sign in.</p>
+    </form>
+  </section>
+
+  <!-- Shown only when js/firebase-config.js has not been filled in -->
+  <section id="setup" class="login hidden">
+    <div class="login-card">
+      <div class="brand"><img src="assets/icon.svg" alt="" width="44" height="44"><div><h1>Riod Inventory</h1><p>Setup required</p></div></div>
+      <p>The Firebase connection is not configured yet.</p>
+      <p class="muted">Open <code>js/firebase-config.js</code> and paste your Firebase web config. Follow <b>README.md → Setup</b>.</p>
+    </div>
+  </section>
+
+  <!-- App -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand small"><img src="assets/icon.svg" alt="" width="28" height="28"><span>Riod Inventory</span></div>
+      <nav id="nav"></nav>
+    </aside>
+    <div class="scrim" onclick="document.getElementById('app').classList.remove('nav-open')"></div>
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-toggle" id="menuToggle" aria-label="Menu">&#9776;</button>
+        <h2 id="viewTitle"></h2>
+        <div class="user">
+          <button class="user-btn" id="userBtn" type="button"><span class="avatar" id="avatar"></span><span id="userName"></span></button>
+          <div class="menu hidden" id="userMenu">
+            <div class="menu-head" id="userEmail"></div>
+            <button data-menu="notify" type="button">Enable desktop notifications</button>
+            <button data-menu="password" type="button">Change password</button>
+            <button data-menu="logout" type="button">Sign out</button>
+          </div>
+        </div>
+      </header>
+      <div id="notifyBanner" class="banner hidden">
+        <span>Turn on desktop notifications to hear when teammates add components or request parts from you.</span>
+        <span><button class="btn sm primary" id="enableNotify" type="button">Enable</button>
+        <button class="btn sm ghost" id="dismissNotify" type="button">Not now</button></span>
+      </div>
+      <main id="view" class="view"></main>
+    </div>
+  </div>
+
+  <datalist id="dl-packages"></datalist>
+  <datalist id="dl-ictypes"></datalist>
+  <datalist id="dl-categories"></datalist>
+  <datalist id="dl-mfrs"></datalist>
+  <datalist id="dl-projects"></datalist>
+  <datalist id="dl-sites"></datalist>
+
+  <div id="modalRoot"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+  <script>
+    // If the module fails to load (e.g. no internet for the CDN), show a message instead of a blank page.
+    setTimeout(function () {
+      var b = document.getElementById('boot');
+      if (b && !b.classList.contains('hidden')) b.innerHTML = '<p style="max-width:420px;text-align:center">Still loading… If this does not go away, check your internet connection and reload. Riod Inventory needs access to gstatic.com and cdn.sheetjs.com.</p>';
+    }, 12000);
+  </script>
+</body>
+</html>
