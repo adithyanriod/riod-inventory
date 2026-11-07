@@ -1,13 +1,13 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js';
-import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js';
+import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js?v=6';
+import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=6';
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js';
-import * as BOM from './bom.js';
+} from './util.js?v=6';
+import * as BOM from './bom.js?v=6';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -38,6 +38,8 @@ const SITES = ['Mouser', 'DigiKey', 'LCSC', 'Element14 / Farnell', 'RS Component
 const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked', taken: 'Taken',
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
+// Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
+const APP_VERSION = 6;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -207,7 +209,7 @@ function startApp() {
   S.loginTime = Date.now();
   showOnly('app');
   $('#userName').textContent = S.profile.name;
-  $('#userEmail').textContent = S.profile.email;
+  $('#userEmail').innerHTML = `${esc(S.profile.email)}<br><span class="small">Riod Inventory v${APP_VERSION}</span>`;
   $('#avatar').textContent = (S.profile.name || '?').trim().charAt(0).toUpperCase();
   buildNav();
   subscribe();
@@ -1157,7 +1159,8 @@ function renderImport(el) {
         }
         html = parts.length ? parts.join(' ') : '<span class="st ok">Ready</span>';
       }
-      $('.status', tr).innerHTML = html;
+      const cell = $('.status', tr);
+      if (cell._html !== html) { cell.innerHTML = html; cell._html = html; } // don't replace buttons the user may be clicking
       tr.classList.toggle('row-bad', it.include && miss.length > 0);
       tr.classList.toggle('row-excluded', !it.include);
       tr.classList.toggle('hidden', st.onlyBad && !(it.include && miss.length > 0));
