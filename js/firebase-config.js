@@ -10,12 +10,12 @@
 // =====================================================================
 
 export const firebaseConfig = {
-  apiKey: "PASTE_YOUR_API_KEY",
-  authDomain: "your-project.firebaseapp.com",
-  projectId: "your-project",
-  storageBucket: "your-project.appspot.com",
-  messagingSenderId: "000000000000",
-  appId: "1:000000000000:web:0000000000000000"
+  apiKey: "AIzaSyBTsu-NgINdUAwHXJyBZ3Ld0NPLR0qoaJU",
+  authDomain: "riod-inventory.firebaseapp.com",
+  projectId: "riod-inventory",
+  storageBucket: "riod-inventory.firebasestorage.app",
+  messagingSenderId: "882334493502",
+  appId: "1:882334493502:web:ea30b8adcecf6a28b29a6f"
 };
 
 // Only emails ending with this domain can sign in.
