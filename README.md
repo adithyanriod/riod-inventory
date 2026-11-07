@@ -59,7 +59,11 @@ live in Firebase.
 - **Add a separate column named `Stock Qty`.** The quantity is read **only** from that column.
   The BOM's per-board `Qty` / `Quantity` column is ignored.
 - Mandatory columns: **Part Number, Value, Package/Size, Description, Stock Qty**.
-  Optional: Manufacturer, Category, Designator (used to guess the category), Project.
+  Optional: Manufacturer, Category, Designator (used to guess the category), Project, **Source**.
+- **Source is per component.** Add a `Source` (or `Supplier` / `Vendor` / `Site`) column with where each part was
+  bought, e.g. `Mouser`, `LCSC`, or a vendor's name. In the preview every row has its own **Online / Vendor** choice
+  and source name, which you can edit. Saved vendors are recognised automatically, and new vendor names are added
+  to the Vendors list (add their contact details there later). Columns like `Supplier Part Number` are ignored.
 - Headers from KiCad / Altium exports are recognised automatically (`Manufacturer Part Number`, `MPN`, `Comment`,
   `Footprint`, …). KiCad footprints like `Resistor_SMD:R_0603_1608Metric` become `0603`.
 - The preview marks missing fields in red. Fix them directly in the table, or they are skipped.

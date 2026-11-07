@@ -427,7 +427,9 @@ function fillDatalists() {
   setDatalist('dl-mfrs', uniqSorted(C.map(c => c.manufacturer)));
   const mine = uniqSorted(C.filter(c => c.ownerUid === myUid()).map(c => c.project));
   setDatalist('dl-projects', uniqSorted([...mine, ...C.map(c => c.project)]));
-  setDatalist('dl-sites', uniqSorted([...SITES, ...C.filter(c => c.sourceType === 'online').map(c => c.sourceName)]));
+  const sites = uniqSorted([...SITES, ...C.filter(c => c.sourceType === 'online').map(c => c.sourceName)]);
+  setDatalist('dl-sites', sites);
+  setDatalist('dl-sources', uniqSorted([...sites, ...S.vendors.map(v => v.name)]));
 }
 
 // ---------------------------------------------------------------------
@@ -449,6 +451,18 @@ function matchQuery(c, q) {
 function isRecent(c, days) {
   const d = toDate(c.lastAddedAt || c.createdAt);
   return !!d && d.getTime() >= Date.now() - days * 864e5;
+}
+function isSavedVendor(name) {
+  const n = String(name || '').trim().toLowerCase();
+  return !!n && S.vendors.some(v => (v.name || '').trim().toLowerCase() === n);
+}
+// Decides Online vs Vendor for an imported row's source name.
+function classifySource(name, headerSaysVendor) {
+  const n = String(name || '').trim();
+  if (!n) return 'online';
+  if (isSavedVendor(n)) return 'vendor';
+  if (SITES.some(s => s.toLowerCase() === n.toLowerCase())) return 'online';
+  return headerSaysVendor ? 'vendor' : 'online';
 }
 function sourceLabel(c) {
   if (c.sourceType === 'vendor') return `Vendor${c.sourceName ? ' · ' + c.sourceName : ''}`;
@@ -828,7 +842,7 @@ function renderAdd(el) {
     <form id="addForm" class="card form" novalidate>
       <p class="muted small">Fields marked <i class="req">*</i> are mandatory. Everyone in the team gets a desktop notification when you add a component.</p>
       ${componentFields({ project: S.ui.lastProject || '' })}
-      ${sourceFields(S.ui.lastSource || {})}
+      ${sourceFields({})}
       <div class="form-actions">
         <button class="btn primary" type="submit">Add component</button>
         <button class="btn ghost" type="button" id="clear">Clear</button>
@@ -867,8 +881,7 @@ function renderAdd(el) {
         type: 'add', byUid: myUid(), byName: S.profile.name, qty: d.qty, value: d.value, package: d.package,
         description: d.description, partNumber: d.partNumber, project: d.project, createdAt: serverTimestamp(),
       });
-      S.ui.lastProject = d.project;
-      S.ui.lastSource = { sourceType: src.sourceType, sourceName: src.sourceName, vendorId: src.vendorId };
+      S.ui.lastProject = d.project; // project is remembered; source is per component so it is not
       toast(`Added ${d.qty} × ${d.partNumber}`, 'success');
       route(); // fresh form, keeps last project & source
     } catch (err2) {
@@ -894,7 +907,8 @@ function renderImport(el) {
       <strong>Before you import:</strong> add a separate column named <b>Stock Qty</b> to your Excel / BOM file.
       The stock quantity is read <u>only</u> from the <b>Stock Qty</b> column. The BOM's per-board "Qty" or "Quantity" column is ignored.
       <br>Mandatory columns: <b>Part Number</b>, <b>Value</b>, <b>Package / Size</b>, <b>Description</b> and <b>Stock Qty</b>.
-      Optional: Manufacturer, Category, Designator, Project.
+      Optional: Manufacturer, Category, Designator, Project, and <b>Source</b> (where each part was bought: a site like Mouser / LCSC, or a vendor name).
+      You can also set or change the source of each part in the preview below.
       <div class="notice-actions"><button class="btn sm" id="tpl" type="button">Download Excel template</button></div>
     </div>
     <div class="card form" id="importSetup">
@@ -903,11 +917,9 @@ function renderImport(el) {
         <label>Sheet<select id="sheet" disabled><option>—</option></select></label>
         <label>Project name <i>*</i><input id="proj" list="dl-projects" placeholder="e.g. Motor Controller Rev B"></label>
       </div>
-      ${sourceFields(S.ui.lastSource || {})}
     </div>
     <div id="mapping"></div>
     <div id="preview"></div>`;
-  wireSource($('#importSetup', el));
   $('#tpl', el).onclick = () => BOM.downloadTemplate();
   const projInput = $('#proj', el);
   projInput.addEventListener('input', () => refreshAll());
@@ -937,6 +949,10 @@ function renderImport(el) {
   }
   function rebuild() {
     st.items = BOM.buildItems(st.rows, st.headerIdx, st.map);
+    // A "Vendor"/"Supplier" column means vendor; a "Site"/"Source" column means online unless the name is a saved vendor.
+    const srcHeader = st.map.source >= 0 ? BOM.normHeader(st.headers[st.map.source]) : '';
+    const headerSaysVendor = /vendor|supplier/.test(srcHeader);
+    for (const it of st.items) it.sourceType = classifySource(it.sourceName, headerSaysVendor);
     renderMapping();
     renderPreview();
   }
@@ -964,7 +980,16 @@ function renderImport(el) {
   }
 
   const CELLS = [['partNumber', 'Part Number', true], ['value', 'Value', true], ['package', 'Package / Size', true],
-    ['description', 'Description', true], ['manufacturer', 'Manufacturer'], ['category', 'Category'], ['qty', 'Stock Qty', true]];
+    ['description', 'Description', true], ['manufacturer', 'Manufacturer'], ['category', 'Category'], ['qty', 'Stock Qty', true],
+    ['sourceName', 'Source (bought from)']];
+
+  const cellHtml = (it, i, k) => {
+    const inp = `<input class="cell c-${k}" data-i="${i}" data-k="${k}" value="${esc(it[k])}" ${k === 'package' ? 'list="dl-packages"' : ''}${k === 'category' ? 'list="dl-categories"' : ''}${k === 'sourceName' ? `list="dl-sources" placeholder="${it.sourceType === 'vendor' ? 'Vendor name' : 'Site, e.g. Mouser'}"` : ''}>`;
+    if (k !== 'sourceName') return `<td>${inp}</td>`;
+    return `<td><div class="src-cell"><select class="src-type" data-i="${i}" title="Online site or vendor">
+      <option value="online" ${it.sourceType !== 'vendor' ? 'selected' : ''}>Online</option>
+      <option value="vendor" ${it.sourceType === 'vendor' ? 'selected' : ''}>Vendor</option></select>${inp}</div></td>`;
+  };
 
   function renderPreview() {
     const pv = $('#preview', el);
@@ -985,7 +1010,7 @@ function renderImport(el) {
         <tbody>${st.items.map((it, i) => `<tr data-i="${i}">
           <td><input type="checkbox" class="inc" data-i="${i}" ${it.include ? 'checked' : ''}></td>
           <td class="muted">${it.rowNo}</td>
-          ${CELLS.map(([k]) => `<td><input class="cell c-${k}" data-i="${i}" data-k="${k}" value="${esc(it[k])}" ${k === 'package' ? 'list="dl-packages"' : ''}${k === 'category' ? 'list="dl-categories"' : ''}></td>`).join('')}
+          ${CELLS.map(([k]) => cellHtml(it, i, k)).join('')}
           <td class="status"></td></tr>`).join('')}</tbody>
       </table></div></div>`;
 
@@ -996,9 +1021,21 @@ function renderImport(el) {
       const it = st.items[Number(t.dataset.i)];
       it[t.dataset.k] = t.value;
       if (t.dataset.k === 'category') it.icType = t.value.trim() === 'IC' ? BOM.guessIcType(it.description) : '';
+      if (t.dataset.k === 'sourceName' && it.sourceType !== 'vendor' && isSavedVendor(t.value)) {
+        it.sourceType = 'vendor'; // typed a saved vendor's name
+        const sel = t.parentElement.querySelector('.src-type');
+        if (sel) sel.value = 'vendor';
+      }
       refreshAll();
     });
     tbody.addEventListener('change', e => {
+      if (e.target.classList.contains('src-type')) {
+        const it = st.items[Number(e.target.dataset.i)];
+        it.sourceType = e.target.value;
+        const inp = e.target.parentElement.querySelector('.cell');
+        if (inp) inp.placeholder = it.sourceType === 'vendor' ? 'Vendor name' : 'Site, e.g. Mouser';
+        return;
+      }
       if (!e.target.classList.contains('inc')) return;
       st.items[Number(e.target.dataset.i)].include = e.target.checked;
       refreshAll();
@@ -1090,6 +1127,7 @@ function renderImport(el) {
         partNumber: it.partNumber.trim(), value: String(it.value).trim(), package: String(it.package).trim(),
         description: String(it.description).trim(), manufacturer: String(it.manufacturer || '').trim(),
         category: String(it.category || '').trim(), icType: it.icType || '', project, qty: q,
+        sourceType: it.sourceType === 'vendor' ? 'vendor' : 'online', sourceName: String(it.sourceName || '').trim(),
       });
     }
     const list = [...groups.values()];
@@ -1108,7 +1146,23 @@ function renderImport(el) {
     const btn = $('#doImport', el);
     btn.dataset.busy = '1'; btn.disabled = true;
     try {
-      const src = await resolveSource(readSource($('#importSetup', el)));
+      // Save any vendor names that are not in the vendor directory yet (one entry per name).
+      const vendorIds = new Map(S.vendors.map(v => [(v.name || '').trim().toLowerCase(), { id: v.id, name: v.name }]));
+      for (const x of list) {
+        if (x.sourceType !== 'vendor' || !x.sourceName) continue;
+        const k = x.sourceName.toLowerCase();
+        if (vendorIds.has(k)) continue;
+        const ref = await addDoc(collection(db, 'vendors'), {
+          name: x.sourceName, contact: '', phone: '', email: '', notes: '',
+          createdBy: myUid(), createdByName: S.profile.name, createdAt: serverTimestamp(),
+        });
+        vendorIds.set(k, { id: ref.id, name: x.sourceName });
+      }
+      const srcOf = x => {
+        if (x.sourceType !== 'vendor') return { sourceType: 'online', sourceName: x.sourceName, vendorId: '' };
+        const v = x.sourceName ? vendorIds.get(x.sourceName.toLowerCase()) : null;
+        return { sourceType: 'vendor', sourceName: v ? v.name : '', vendorId: v ? v.id : '' };
+      };
       const CHUNK = 200;
       for (let i = 0; i < list.length; i += CHUNK) {
         btn.textContent = `Importing… ${i}/${list.length}`;
@@ -1118,10 +1172,11 @@ function renderImport(el) {
           let ref;
           if (ex) {
             ref = doc(db, 'components', ex.id);
-            batch.update(ref, { qty: increment(x.qty), lastAddedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+            // Restock: keep the old source unless this row says where the new stock came from.
+            batch.update(ref, { qty: increment(x.qty), lastAddedAt: serverTimestamp(), updatedAt: serverTimestamp(), ...(x.sourceName ? srcOf(x) : {}) });
           } else {
             ref = doc(collection(db, 'components'));
-            batch.set(ref, newComponentDoc(x, src));
+            batch.set(ref, newComponentDoc(x, srcOf(x)));
           }
           batch.set(doc(collection(db, 'transactions')), {
             componentId: ref.id, partNumber: x.partNumber, type: 'import', delta: x.qty, toName: '',
@@ -1134,7 +1189,6 @@ function renderImport(el) {
         type: 'bom', byUid: myUid(), byName: S.profile.name, count: list.length, totalQty,
         project: projects.join(', '), fileName: st.fileName, createdAt: serverTimestamp(),
       });
-      S.ui.lastSource = { sourceType: src.sourceType, sourceName: src.sourceName, vendorId: src.vendorId };
       toast(`Imported ${list.length} components (${totalQty} pcs)`, 'success', 5000);
       S.ui.my = { proj: projects.length === 1 ? projects[0] : '', q: '' };
       location.hash = '#my';

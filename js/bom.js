@@ -19,6 +19,11 @@ export const FIELDS = [
     syn: ['description', 'desc', 'partdescription', 'details'], partial: ['desc'] },
   { key: 'manufacturer', label: 'Manufacturer',
     syn: ['manufacturer', 'mfr', 'mfg', 'manufacturername', 'make', 'brand'], partial: ['manufacturer'] },
+  // Where this part was bought (site or vendor name). Columns like "Supplier Part Number" are NOT a source.
+  { key: 'source', label: 'Source (site / vendor)',
+    syn: ['source', 'site', 'website', 'vendor', 'vendorname', 'supplier', 'suppliername', 'boughtfrom',
+          'purchasedfrom', 'distributor', 'seller', 'store', 'shop'],
+    partial: ['vendor', 'supplier', 'source', 'distributor'] },
   { key: 'category', label: 'Category',
     syn: ['category', 'componenttype', 'parttype', 'type', 'class'], partial: ['category'] },
   { key: 'designator', label: 'Designator (used to guess category)',
@@ -78,6 +83,8 @@ export function autoMap(headers) {
     }
     // Safety: never map the BOM per-board quantity column as stock.
     if (f.key === 'qty' && idx >= 0 && !norm[idx].includes('stock')) idx = -1;
+    // "Supplier Part Number", "Vendor PN", "Supplier Link" etc. are not the source name.
+    if (f.key === 'source' && idx >= 0 && /part|pn$|number|no$|link|url|price|cost|qty/.test(norm[idx])) idx = -1;
     if (idx >= 0) used.add(idx);
     map[f.key] = idx;
   }
@@ -158,6 +165,8 @@ export function buildItems(rows, headerIdx, map) {
       category: get(r, 'category'),
       project: get(r, 'project'),
       qty: get(r, 'qty'),
+      sourceName: get(r, 'source'),
+      sourceType: 'online', // decided by the app (it knows the saved vendors)
     };
     const designator = get(r, 'designator');
     if (!it.partNumber && !it.value && !it.package && !it.description && !it.qty) continue; // empty row
@@ -181,13 +190,13 @@ export function missingFields(it) {
 
 export function downloadTemplate() {
   const aoa = [
-    ['Part Number', 'Value', 'Package', 'Description', 'Manufacturer', 'Category', 'Designator', 'Stock Qty'],
-    ['RC0603FR-0710KL', '10k', '0603', 'Resistor 10k 1% 1/10W', 'Yageo', 'Resistor', 'R1', '100'],
-    ['CL10B104KB8NNNC', '100nF', '0603', 'Capacitor MLCC 100nF 50V X7R', 'Samsung', 'Capacitor', 'C1', '200'],
-    ['TPS62130RGTR', 'TPS62130', 'QFN-16', 'Buck converter 3A 17V', 'Texas Instruments', 'IC', 'U1', '5'],
+    ['Part Number', 'Value', 'Package', 'Description', 'Manufacturer', 'Category', 'Designator', 'Source', 'Stock Qty'],
+    ['RC0603FR-0710KL', '10k', '0603', 'Resistor 10k 1% 1/10W', 'Yageo', 'Resistor', 'R1', 'LCSC', '100'],
+    ['CL10B104KB8NNNC', '100nF', '0603', 'Capacitor MLCC 100nF 50V X7R', 'Samsung', 'Capacitor', 'C1', 'Mouser', '200'],
+    ['TPS62130RGTR', 'TPS62130', 'QFN-16', 'Buck converter 3A 17V', 'Texas Instruments', 'IC', 'U1', 'DigiKey', '5'],
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 34 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 10 }];
+  ws['!cols'] = [{ wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 34 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 10 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'BOM');
   XLSX.writeFile(wb, 'riod_inventory_import_template.xlsx');
