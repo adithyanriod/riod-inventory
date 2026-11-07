@@ -230,6 +230,10 @@ select.missing, input.missing { border-color: var(--bad); background: var(--bad-
 .st.info { color: var(--info); background: var(--info-soft); }
 .st.warn { color: var(--warn); background: var(--warn-soft); }
 .st-link { border: 0; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.st.muted { color: var(--muted); background: var(--surface-2); }
+.tbl.preview td.status { min-width: 220px; }
+.tbl.preview td.status > * { margin: 2px 4px 2px 0; }
+.btn.nocombine { padding: 2px 8px; font-size: 12px; color: var(--text); border-color: var(--border); }
 .st-link:hover { filter: brightness(.95); text-decoration-style: solid; }
 .tbl tr.current td { background: var(--warn-soft); }
 @keyframes rowflash { 0%, 60% { background: var(--warn-soft); box-shadow: inset 4px 0 0 var(--warn); } 100% { background: transparent; } }

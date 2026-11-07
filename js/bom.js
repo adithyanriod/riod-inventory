@@ -133,6 +133,27 @@ const IC_TYPE = [
   [/ethernet|\bphy\b/i, 'Ethernet PHY'], [/load switch/i, 'Load Switch'], [/level shift|translator/i, 'Level Shifter'],
 ];
 
+export const CATEGORIES = ['Resistor', 'Capacitor', 'Inductor', 'Ferrite Bead', 'Diode', 'LED', 'Transistor', 'MOSFET',
+  'IC', 'Connector', 'Crystal / Oscillator', 'Fuse', 'Switch', 'Relay', 'Sensor', 'Module', 'Battery',
+  'Test Point', 'Mechanical', 'Other'];
+
+// Maps whatever a BOM's category/type column says ("Capacitors", "Chip Resistor", "CAP", "ICs", "Crystal")
+// to one of our categories. Returns '' when it is not recognisable (e.g. "SMD", "Default").
+export function normalizeCategory(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  const forms = [lower, lower.replace(/s$/, ''), lower.replace(/es$/, '')]; // "Capacitors", "Switches", "ICs"
+  const exact = CATEGORIES.find(c => forms.includes(c.toLowerCase()));
+  if (exact) return exact;
+  const SHORT = { r: 'Resistor', res: 'Resistor', c: 'Capacitor', cap: 'Capacitor', l: 'Inductor', ind: 'Inductor',
+    d: 'Diode', q: 'Transistor', u: 'IC', ics: 'IC', xtal: 'Crystal / Oscillator', crystal: 'Crystal / Oscillator',
+    crystals: 'Crystal / Oscillator', oscillator: 'Crystal / Oscillator', j: 'Connector', conn: 'Connector', f: 'Fuse' };
+  if (SHORT[lower]) return SHORT[lower];
+  for (const [re, cat] of WORD_CAT) if (re.test(s)) return cat;
+  return '';
+}
+
 export function guessCategory(designator, description) {
   const pre = (String(designator || '').trim().split(/[\s,;]+/)[0] || '').match(/^([A-Za-z]+)/);
   if (pre) {
@@ -152,7 +173,7 @@ export function guessCategory(designator, description) {
 //  Component value — only parts whose value matters need one.
 // ---------------------------------------------------------------------
 export const VALUE_CATEGORIES = ['Resistor', 'Capacitor', 'Inductor', 'Ferrite Bead', 'Crystal / Oscillator', 'Fuse'];
-export const needsValue = cat => VALUE_CATEGORIES.includes(String(cat || '').trim());
+export const needsValue = cat => VALUE_CATEGORIES.includes(normalizeCategory(cat) || String(cat || '').trim());
 
 const fmtNum = s => {
   const f = parseFloat(String(s).replace(',', '.'));
@@ -205,7 +226,7 @@ export function current(d) {
 // Reads the value out of a description, based on what kind of part it is.
 export function extractValue(text, category) {
   const d = String(text || '');
-  switch (String(category || '').trim()) {
+  switch (normalizeCategory(category) || String(category || '').trim()) {
     case 'Resistor': return resistance(d);
     case 'Capacitor': return capacitance(d);
     case 'Inductor': return inductance(d);
@@ -253,7 +274,8 @@ export function buildItems(rows, headerIdx, map) {
     const designator = get(r, 'designator');
     it.designator = designator;
     if (!it.partNumber && !it.value && !it.package && !it.description && !it.qty) continue; // empty row
-    if (!it.category) it.category = guessCategory(designator, `${it.description} ${it.value}`);
+    // Use the file's category only if we recognise it; otherwise detect from designator / description.
+    it.category = normalizeCategory(it.category) || guessCategory(designator, `${it.description} ${it.value}`);
     it.icType = it.category === 'IC' ? guessIcType(it.description) : '';
     it.value = deriveValue(it.description, it.value, it.category);
     items.push(it);

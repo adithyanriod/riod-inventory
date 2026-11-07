@@ -1,13 +1,13 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js?v=6';
-import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=6';
+import { auth, db, fb, createAuthUser, isConfigured } from './firebase.js?v=7';
+import { COMPANY_DOMAIN, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=7';
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=6';
-import * as BOM from './bom.js?v=6';
+} from './util.js?v=7';
+import * as BOM from './bom.js?v=7';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -39,7 +39,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 6;
+const APP_VERSION = 7;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -69,7 +69,10 @@ const isLow = c => c.qty > 0 && c.qty < LOW_STOCK_THRESHOLD;
 const isOut = c => c.qty <= 0;
 const qtyClass = q => (q <= 0 ? 'out' : q < LOW_STOCK_THRESHOLD ? 'low' : 'ok');
 const vp = x => [x.value, x.package].filter(Boolean).join(' '); // "10k 0603", or just "QFN-16" for an IC
-const keyOf = (pn, proj) => `${String(pn).trim().toLowerCase()}|${String(proj || '').trim().toLowerCase()}`;
+// Two entries are "the same component" only if part number, project AND value match.
+// (A BOM may wrongly reuse a part number for e.g. 1.5k and 1.62k resistors; those must not be merged.)
+const keyOf = (pn, proj, value = '') =>
+  `${String(pn).trim().toLowerCase()}|${String(proj || '').trim().toLowerCase()}|${normValue(value)}`;
 
 // ---------------------------------------------------------------------
 //  Boot
@@ -875,7 +878,7 @@ function renderAdd(el) {
     const btn = form.querySelector('[type=submit]');
     btn.disabled = true;
     try {
-      const existing = S.components.find(c => c.ownerUid === myUid() && keyOf(c.partNumber, c.project) === keyOf(d.partNumber, d.project));
+      const existing = S.components.find(c => c.ownerUid === myUid() && keyOf(c.partNumber, c.project, c.value) === keyOf(d.partNumber, d.project, d.value));
       if (existing) {
         const ok = await confirmDialog('Already in your inventory',
           `You already have <b>${existing.qty}</b> × <b>${esc(existing.partNumber)}</b> in project <b>${esc(existing.project)}</b>.<br>Add <b>${d.qty}</b> more to that stock (new total ${existing.qty + d.qty})?`,
@@ -1063,6 +1066,14 @@ function renderImport(el) {
       refreshAll();
     });
     tbody.addEventListener('click', e => {
+      const nc = e.target.closest('[data-nocombine]');
+      if (nc) {
+        const i = Number(nc.dataset.nocombine);
+        [i, ...combinedWith(i)].forEach(j => { st.items[j].noCombine = true; });
+        refreshAll();
+        toast('Those rows will be imported as separate components. Click "Kept separate" to undo.');
+        return;
+      }
       const dup = e.target.closest('[data-dup]');
       if (dup) { showDuplicates(Number(dup.dataset.dup)); return; }
       const ex = e.target.closest('[data-exist]');
@@ -1088,29 +1099,56 @@ function renderImport(el) {
     tr.classList.remove('flash'); void tr.offsetWidth; tr.classList.add('flash');
   }
 
-  // Lists every row in the file that has the same part number (and project) as row i.
+  const isValid = x => x.include && !BOM.missingFields(x).length;
+  const itemKey = x => keyOf(x.partNumber, itemProject(x), x.value); // same part = same PN + project + value
+  const pnKey = x => keyOf(x.partNumber, itemProject(x));             // same part number only
+
+  // Rows that will be merged with row i (same part number + value, nobody chose "don't combine").
+  const combinedWith = i => {
+    const it = st.items[i];
+    if (!isValid(it) || it.noCombine) return [];
+    return st.items.map((_, j) => j).filter(j => j !== i && isValid(st.items[j]) && !st.items[j].noCombine && itemKey(st.items[j]) === itemKey(it));
+  };
+  // Rows that reuse row i's part number for a DIFFERENT value (likely a mistake in the BOM).
+  const conflictsWith = i => {
+    const it = st.items[i];
+    if (!isValid(it)) return [];
+    return st.items.map((_, j) => j).filter(j => j !== i && isValid(st.items[j]) && pnKey(st.items[j]) === pnKey(it) && itemKey(st.items[j]) !== itemKey(it));
+  };
+
+  // Lists every row in the file with the same part number as row i, and what will happen to each.
   function showDuplicates(i) {
     const it = st.items[i];
-    const k = keyOf(it.partNumber, itemProject(it));
-    const idx = st.items.map((x, j) => j).filter(j => {
-      const x = st.items[j];
-      return x.include && !BOM.missingFields(x).length && keyOf(x.partNumber, itemProject(x)) === k;
-    });
-    const total = idx.reduce((s, j) => s + BOM.parseQty(st.items[j].qty), 0);
+    const idx = st.items.map((_, j) => j).filter(j => isValid(st.items[j]) && pnKey(st.items[j]) === pnKey(it));
+    const merged = combinedWith(i);
+    const conflicts = conflictsWith(i);
+    const total = [i, ...merged].reduce((s, j) => s + BOM.parseQty(st.items[j].qty), 0);
     const srcTxt = x => x.sourceName ? `${x.sourceType === 'vendor' ? 'Vendor' : 'Online'} · ${x.sourceName}` : '—';
+    const outcome = j => {
+      const x = st.items[j];
+      if (x.noCombine) return '<span class="st muted">Kept separate</span>';
+      if (j === i) return merged.length ? '<span class="st info">Combined</span>' : '<span class="st ok">Own component</span>';
+      if (merged.includes(j)) return '<span class="st info">Combined with this row</span>';
+      return '<span class="st warn">Different value: separate</span>';
+    };
+    let msg = `Part number <b class="mono">${esc(it.partNumber)}</b> appears in <b>${idx.length} rows</b> of <b>${esc(st.fileName)}</b>.`;
+    if (merged.length) msg += `<br>Rows with the <b>same value</b> are imported as <b>one component with ${total.toLocaleString()} pcs</b>. Click <b>Don't combine</b> to keep them as separate entries.`;
+    if (conflicts.length) msg += `<br><span class="text-warn">Some rows use this part number for a <b>different value</b>. That is usually a mistake in the BOM, so they are <b>not</b> combined. Check the part number.</span>`;
     const dm = openModal({
-      title: `Duplicate: ${it.partNumber}`, wide: true,
-      body: `<p>This part number appears in <b>${idx.length} rows</b> of <b>${esc(st.fileName)}</b> (project <b>${esc(itemProject(it))}</b>).
-          They will be imported as <b>one component with ${total.toLocaleString()} pcs</b>, using the details from the first row.
-          To keep a row out, untick it in the preview.</p>
+      title: `Same part number: ${it.partNumber}`, wide: true,
+      body: `<p>${msg}</p>
         <div class="table-wrap"><table class="tbl compact"><thead><tr>
-          <th>Row in file</th><th>Designator</th><th>Value</th><th>Package</th><th>Description</th><th class="num">Stock Qty</th><th>Source</th><th></th></tr></thead>
+          <th>Row in file</th><th>Designator</th><th>Value</th><th>Package</th><th>Description</th><th class="num">Stock Qty</th><th>Source</th><th>Result</th><th></th></tr></thead>
         <tbody>${idx.map(j => { const x = st.items[j]; return `<tr class="${j === i ? 'current' : ''}">
           <td class="strong">${x.rowNo}${j === i ? ' <span class="you">this row</span>' : ''}</td><td>${esc(x.designator || '—')}</td>
           <td>${esc(x.value || '—')}</td><td>${esc(x.package)}</td><td class="desc">${esc(x.description)}</td>
-          <td class="num">${esc(x.qty)}</td><td>${esc(srcTxt(x))}</td>
+          <td class="num">${esc(x.qty)}</td><td>${esc(srcTxt(x))}</td><td>${outcome(j)}</td>
           <td class="actions"><button class="btn sm" type="button" data-goto="${j}">Go to row</button></td></tr>`; }).join('')}</tbody></table></div>`,
-      actions: [{ label: 'Close', cls: 'ghost' }],
+      actions: [
+        ...(merged.length ? [{ label: "Don't combine these rows", onClick: () => { [i, ...merged].forEach(j => { st.items[j].noCombine = true; }); refreshAll(); toast('These rows will be imported as separate components.'); } }] : []),
+        ...(st.items[i].noCombine ? [{ label: 'Combine again', onClick: () => { idx.forEach(j => { if (itemKey(st.items[j]) === itemKey(it)) st.items[j].noCombine = false; }); refreshAll(); } }] : []),
+        { label: 'Close', cls: 'ghost' },
+      ],
     });
     dm.el.addEventListener('click', e => {
       const b = e.target.closest('[data-goto]');
@@ -1125,14 +1163,8 @@ function renderImport(el) {
   function refreshAll() {
     const pv = $('#preview', el);
     if (!st.items.length || !$('tbody', pv)) return;
-    const mine = new Map(S.components.filter(c => c.ownerUid === myUid()).map(c => [keyOf(c.partNumber, c.project), c]));
-    const keyRows = new Map(); // key -> indexes of valid rows with that part number + project
-    st.items.forEach((it, i) => {
-      if (!it.include || BOM.missingFields(it).length) return;
-      const k = keyOf(it.partNumber, itemProject(it));
-      if (!keyRows.has(k)) keyRows.set(k, []);
-      keyRows.get(k).push(i);
-    });
+    const mine = new Map(S.components.filter(c => c.ownerUid === myUid()).map(c => [keyOf(c.partNumber, c.project, c.value), c]));
+    const rowList = js => js.map(j => st.items[j].rowNo).join(', ');
     let ready = 0, bad = 0, excluded = 0, pcs = 0;
     st.items.forEach((it, i) => {
       const tr = $(`tr[data-i="${i}"]`, pv);
@@ -1148,14 +1180,19 @@ function renderImport(el) {
       else if (miss.length) { html = `<span class="st bad">Missing: ${esc(miss.join(', '))}</span>`; bad++; }
       else {
         ready++; pcs += BOM.parseQty(it.qty);
-        const k = keyOf(it.partNumber, itemProject(it));
-        const ex = mine.get(k);
+        const ex = it.noCombine ? null : mine.get(itemKey(it));
         const parts = [];
         if (ex) parts.push(`<button type="button" class="st info st-link" data-exist="${ex.id}" title="Open the part already in your inventory">Adds to your existing stock (${ex.qty} now)</button>`);
-        const others = (keyRows.get(k) || []).filter(j => j !== i);
-        if (others.length) {
-          const rowsTxt = others.map(j => st.items[j].rowNo).join(', ');
-          parts.push(`<button type="button" class="st warn st-link" data-dup="${i}" title="Show where the duplicates are">Duplicate of row ${rowsTxt}, will be combined</button>`);
+        const merged = combinedWith(i);
+        const conflicts = conflictsWith(i);
+        if (it.noCombine) {
+          parts.push(`<button type="button" class="st muted st-link" data-dup="${i}" title="Show the rows with this part number">Kept separate (not combined)</button>`);
+        } else if (merged.length) {
+          parts.push(`<button type="button" class="st info st-link" data-dup="${i}" title="Show where the duplicates are">Duplicate of row ${rowList(merged)}, will be combined</button>` +
+            `<button type="button" class="btn sm ghost nocombine" data-nocombine="${i}" title="Import these rows as separate components">Don't combine</button>`);
+        }
+        if (conflicts.length) {
+          parts.push(`<button type="button" class="st warn st-link" data-dup="${i}" title="Same part number, different value. Check the BOM">Same part no. as row ${rowList(conflicts)} but different value, kept separate</button>`);
         }
         html = parts.length ? parts.join(' ') : '<span class="st ok">Ready</span>';
       }
@@ -1185,10 +1222,13 @@ function renderImport(el) {
     const groups = new Map();
     for (const it of readyItems) {
       const project = itemProject(it);
-      const k = keyOf(it.partNumber, project);
+      const k = itemKey(it);
+      // "Don't combine" rows become their own component (not merged with other rows or existing stock).
+      const gk = it.noCombine ? `${k}#row${it.rowNo}` : k;
       const q = BOM.parseQty(it.qty);
-      if (groups.has(k)) groups.get(k).qty += q;
-      else groups.set(k, {
+      if (groups.has(gk)) groups.get(gk).qty += q;
+      else groups.set(gk, {
+        _key: k, _separate: !!it.noCombine,
         partNumber: it.partNumber.trim(), value: String(it.value).trim(), package: String(it.package).trim(),
         description: String(it.description).trim(), manufacturer: String(it.manufacturer || '').trim(),
         category: String(it.category || '').trim(), icType: it.icType || '', project, qty: q,
@@ -1196,8 +1236,9 @@ function renderImport(el) {
       });
     }
     const list = [...groups.values()];
-    const mine = new Map(S.components.filter(c => c.ownerUid === myUid()).map(c => [keyOf(c.partNumber, c.project), c]));
-    const merges = list.filter(x => mine.has(keyOf(x.partNumber, x.project))).length;
+    const mine = new Map(S.components.filter(c => c.ownerUid === myUid()).map(c => [keyOf(c.partNumber, c.project, c.value), c]));
+    const existingOf = x => (x._separate ? null : mine.get(x._key));
+    const merges = list.filter(existingOf).length;
     const totalQty = list.reduce((s, x) => s + x.qty, 0);
     const skipped = st.items.filter(it => it.include).length - readyItems.length;
     const projects = uniqSorted(list.map(x => x.project));
@@ -1233,7 +1274,7 @@ function renderImport(el) {
         btn.textContent = `Importing… ${i}/${list.length}`;
         const batch = writeBatch(db);
         for (const x of list.slice(i, i + CHUNK)) {
-          const ex = mine.get(keyOf(x.partNumber, x.project));
+          const ex = existingOf(x);
           let ref;
           if (ex) {
             ref = doc(db, 'components', ex.id);
@@ -1663,7 +1704,7 @@ function renderAdmin(el) {
         <td>${u.active ? '<span class="badge approved">active</span>' : '<span class="badge cancelled">removed</span>'}</td>
         <td class="num">${count(u.id)}</td><td>${esc(fmtDate(u.createdAt))}</td><td>${esc(u.lastLogin ? timeAgo(u.lastLogin) : 'never')}</td>
         <td class="actions">${u.active
-          ? `<button class="btn sm danger" data-action="removeEng" data-id="${u.id}">Remove</button>`
+          ? `<button class="btn sm" data-action="resetPass" data-id="${u.id}" title="Email a password reset link">Reset password</button><button class="btn sm danger" data-action="removeEng" data-id="${u.id}">Remove</button>`
           : `<button class="btn sm" data-action="reactivateEng" data-id="${u.id}">Reactivate</button>`}</td>
       </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No engineers yet. Add the first one above.</div>';
   };
@@ -1719,6 +1760,20 @@ const ACTIONS = {
     const u = S.users.find(x => x.id === id);
     if (!u || !await confirmDialog('Remove engineer', `Remove <b>${esc(u.name)}</b> (${esc(u.email)})?<br>They will no longer be able to sign in. Their components stay in the inventory under their name.`, 'Remove', true)) return;
     try { await updateDoc(doc(db, 'users', id), { active: false, removedAt: serverTimestamp() }); toast(`${u.name} removed.`); } catch (e) { toast(e.message, 'error'); }
+  },
+  resetPass: async id => {
+    const u = S.users.find(x => x.id === id);
+    if (!u) return;
+    const ok = await confirmDialog('Reset password',
+      `Send a password reset link to <b>${esc(u.email)}</b>?<br><br>
+       ${esc(u.name)} opens the email, clicks the link and chooses a new password. Their current password keeps working until they do.
+       <br><span class="muted small">Ask them to check the Spam/Junk folder if it doesn't arrive in a minute. The sender is noreply@riod-inventory.firebaseapp.com.</span>`,
+      'Send reset link');
+    if (!ok) return;
+    try {
+      await sendPasswordResetEmail(auth, u.email);
+      toast(`Password reset link sent to ${u.email}.`, 'success', 5000);
+    } catch (e) { toast(friendlyAuthError(e), 'error', 6000); }
   },
   reactivateEng: async id => {
     const u = S.users.find(x => x.id === id);
