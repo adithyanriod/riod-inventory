@@ -1,14 +1,14 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=14';
-import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD, PRODUCTION_EMAILS } from './firebase-config.js?v=14';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=15';
+import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD, PRODUCTION_EMAILS } from './firebase-config.js?v=15';
 const isCompanyEmail = e => COMPANY_DOMAINS.includes(String(e || '').toLowerCase().split('@')[1]);
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=14';
-import * as BOM from './bom.js?v=14';
+} from './util.js?v=15';
+import * as BOM from './bom.js?v=15';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -39,7 +39,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 14;
+const APP_VERSION = 15;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -200,11 +200,13 @@ function wireShell() {
   });
   // ☰ : on a phone it slides the menu in/out; on a PC it collapses the menu to icons only (remembered).
   try { if (localStorage.getItem('riod.navCollapsed') === '1') $('#app').classList.add('nav-collapsed'); } catch { /* ignore */ }
-  $('#menuToggle').addEventListener('click', () => {
-    if (window.matchMedia('(max-width: 820px)').matches) { $('#app').classList.toggle('nav-open'); return; }
+  // PC: ☰ at the top-left of the sidebar collapses it to icons. Phone: ☰ in the top bar slides the menu in.
+  $('#sideToggle').addEventListener('click', () => {
+    if (window.matchMedia('(max-width: 820px)').matches) { $('#app').classList.remove('nav-open'); return; }
     const c = $('#app').classList.toggle('nav-collapsed');
     try { localStorage.setItem('riod.navCollapsed', c ? '1' : '0'); } catch { /* ignore */ }
   });
+  $('#menuToggle').addEventListener('click', () => $('#app').classList.toggle('nav-open'));
   $('#nav').addEventListener('click', e => { if (e.target.closest('a')) $('#app').classList.remove('nav-open'); });
   $('#enableNotify').addEventListener('click', requestNotify);
   $('#dismissNotify').addEventListener('click', () => {
@@ -701,10 +703,16 @@ function renderMy(el) {
     <div class="my-layout ${collapsed ? 'proj-collapsed' : ''}">
       <aside class="card proj-list">
         <div class="proj-head"><h4>My projects</h4>
-          <button type="button" class="icon-btn proj-toggle" id="projToggle" title="Hide / show projects" aria-label="Hide or show projects">‹</button></div>
+          <button type="button" class="icon-btn proj-toggle" id="projToggle" title="Hide the project panel (use ☰ to pick a project)" aria-label="Hide project panel">‹</button></div>
         <div id="projs"></div></aside>
       <section>
         <div class="toolbar">
+          <div class="proj-dd" id="projDD">
+            <button type="button" class="btn proj-dd-btn" id="projBtn" aria-haspopup="true" aria-expanded="false" title="Select project">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+              <span id="projBtnLabel">All projects</span><span class="caret">▾</span></button>
+            <div class="proj-menu hidden" id="projMenu" role="menu"></div>
+          </div>
           <input id="q" class="search" type="search" autocomplete="off" placeholder="Search my components…" value="${esc(st.q)}">
           <a class="btn primary" href="#add">+ Add component</a>
           <a class="btn" href="#import">Import BOM</a>
@@ -714,15 +722,28 @@ function renderMy(el) {
       </section>
     </div>`;
 
+  const layout = $('.my-layout', el);
+  const menu = $('#projMenu', el), btn = $('#projBtn', el);
+  const setCollapsed = c => {
+    layout.classList.toggle('proj-collapsed', c);
+    try { localStorage.setItem('riod.projCollapsed', c ? '1' : '0'); } catch { /* ignore */ }
+  };
+  const openMenu = open => { menu.classList.toggle('hidden', !open); btn.setAttribute('aria-expanded', open ? 'true' : 'false'); };
+
   const update = () => {
     const mine = S.components.filter(c => c.ownerUid === myUid());
     const projects = uniqSorted(mine.map(c => c.project || 'General'));
     if (st.proj && !projects.includes(st.proj)) st.proj = '';
     const count = p => mine.filter(c => (c.project || 'General') === p).length;
+    const items = [['', 'All projects', mine.length], ...projects.map(p => [p, p, count(p)])];
     $('#projs', el).innerHTML =
-      `<button class="proj ${!st.proj ? 'active' : ''}" data-proj="">All projects <span>${mine.length}</span></button>` +
-      projects.map(p => `<button class="proj ${st.proj === p ? 'active' : ''}" data-proj="${esc(p)}">${esc(p)} <span>${count(p)}</span></button>`).join('') +
+      items.map(([v, l, n]) => `<button class="proj ${st.proj === v ? 'active' : ''}" data-proj="${esc(v)}">${esc(l)} <span>${n}</span></button>`).join('') +
       (projects.length ? '' : '<p class="muted small">No projects yet.</p>');
+    menu.innerHTML = items.map(([v, l, n]) =>
+      `<button type="button" role="menuitem" class="proj ${st.proj === v ? 'active' : ''}" data-proj="${esc(v)}">${esc(l)} <span>${n}</span></button>`).join('') +
+      `<div class="proj-menu-sep"></div><button type="button" role="menuitem" class="proj proj-panel-toggle" data-panel>
+        ${layout.classList.contains('proj-collapsed') ? 'Show project panel' : 'Hide project panel'}</button>`;
+    $('#projBtnLabel', el).textContent = st.proj || 'All projects';
     const list = mine.filter(c => (!st.proj || (c.project || 'General') === st.proj) && matchQuery(c, st.q)).sort(SORTS.pn);
     const pcs = list.reduce((s, c) => s + c.qty, 0);
     const lowN = list.filter(isLow).length, outN = list.filter(isOut).length;
@@ -740,16 +761,21 @@ function renderMy(el) {
     }).join('') || '<div class="empty">No matching components.</div>';
   };
 
-  $('#projToggle', el).addEventListener('click', () => {
-    const c = $('.my-layout', el).classList.toggle('proj-collapsed');
-    try { localStorage.setItem('riod.projCollapsed', c ? '1' : '0'); } catch { /* ignore */ }
-  });
-  $('#projs', el).addEventListener('click', e => {
+  $('#projToggle', el).addEventListener('click', () => { setCollapsed(true); update(); });
+  btn.addEventListener('click', () => openMenu(menu.classList.contains('hidden')));
+  // Close the dropdown when focus leaves it (click elsewhere, Tab away) or on Escape.
+  $('#projDD', el).addEventListener('focusout', e => { if (!$('#projDD', el).contains(e.relatedTarget)) openMenu(false); });
+  $('#projDD', el).addEventListener('keydown', e => { if (e.key === 'Escape') { openMenu(false); btn.focus(); } });
+  const pick = e => {
+    if (e.target.closest('[data-panel]')) { setCollapsed(!layout.classList.contains('proj-collapsed')); openMenu(false); update(); return; }
     const b = e.target.closest('[data-proj]');
     if (!b) return;
     st.proj = b.dataset.proj;
+    openMenu(false);
     update();
-  });
+  };
+  $('#projs', el).addEventListener('click', pick);
+  menu.addEventListener('click', pick);
   const q = $('#q', el);
   q.addEventListener('input', debounce(() => { st.q = q.value; update(); }, 120));
   update();
