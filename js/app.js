@@ -1,14 +1,14 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=15';
-import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD, PRODUCTION_EMAILS } from './firebase-config.js?v=15';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=17';
+import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD, PRODUCTION_EMAILS } from './firebase-config.js?v=17';
 const isCompanyEmail = e => COMPANY_DOMAINS.includes(String(e || '').toLowerCase().split('@')[1]);
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=15';
-import * as BOM from './bom.js?v=15';
+} from './util.js?v=17';
+import * as BOM from './bom.js?v=17';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -39,7 +39,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 15;
+const APP_VERSION = 17;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -247,7 +247,7 @@ function startApp() {
 function teardown() {
   S.unsubs.forEach(u => { try { u(); } catch { /* ignore */ } });
   S.unsubs = [];
-  Object.assign(S, { profile: null, isAdmin: false, components: [], vendors: [], users: [], reqIn: [], reqOut: [], activity: [], viewUpdate: null, ui: {} });
+  Object.assign(S, { profile: null, isAdmin: false, components: [], vendors: [], users: [], reqIn: [], reqOut: [], activity: [], viewUpdate: null, ui: {}, newSeen: null, newSince: 0, route: null, prodUids: new Set() });
   $('#modalRoot').innerHTML = '';
 }
 
@@ -378,7 +378,7 @@ async function requestNotify() {
 // ---------------------------------------------------------------------
 const NAV = [
   { id: 'search', label: 'Search Inventory', icon: 'search' },
-  { id: 'new', label: 'New Components', icon: 'sparkle', count: () => visibleComps().filter(c => isRecent(c, 7)).length, cls: 'accent' },
+  { id: 'new', label: 'New Components', icon: 'sparkle', count: () => visibleComps().filter(isUnseenNew).length, cls: 'accent' },
   { id: 'low', label: 'Low Stock', icon: 'alert', count: () => visibleComps().filter(isLow).length, cls: 'warn' },
   { id: 'out', label: 'Out of Stock', icon: 'out', count: () => visibleComps().filter(isOut).length, cls: 'danger' },
   { sep: 'My work', engineer: true },
@@ -399,7 +399,22 @@ function buildNav() {
   ).join('');
 }
 
+// ---- "New Components" badge: counts only parts added since you last looked at that page ----
+const addedMs = c => toDate(c.lastAddedAt || c.createdAt)?.getTime() || 0;
+const seenKey = () => 'riod.newSeen.' + myUid();
+function newSeenAt() {
+  if (S.newSeen == null) { try { S.newSeen = Number(localStorage.getItem(seenKey())) || 0; } catch { S.newSeen = 0; } }
+  return S.newSeen;
+}
+function markNewSeen() {
+  S.newSeen = Date.now();
+  try { localStorage.setItem(seenKey(), String(S.newSeen)); } catch { /* ignore */ }
+}
+const isUnseenNew = c => c.ownerUid !== myUid() && isRecent(c, 7) && addedMs(c) > newSeenAt();
+
 function updateNavCounts() {
+  // While the New Components page is open (and visible), everything on it counts as seen.
+  if (S.route === 'new' && document.visibilityState === 'visible') markNewSeen();
   for (const n of NAV) {
     if (!n.count) continue;
     const el = $(`[data-count="${n.id}"]`);
@@ -432,6 +447,8 @@ function route() {
   document.title = `${VIEWS[v].title} · Riod Inventory`;
   const el = $('#view');
   el.innerHTML = '';
+  if (v === 'new' && S.route !== 'new') S.newSince = newSeenAt(); // rows newer than this get a "new" tag
+  S.route = v;
   S.viewUpdate = null;
   S.viewUpdate = VIEWS[v].render(el) || null;
   updateNavCounts();
@@ -512,6 +529,25 @@ function rowActions(c) {
   return a.join('');
 }
 
+// ---- Sorting by category (Resistor, Capacitor, ... IC / Module ...), then by value ----
+const catLabel = c => c.category || 'Uncategorized';
+const catRank = c => {
+  const i = CATEGORIES.indexOf(c.category);
+  if (i >= 0) return c.category === 'Other' ? 900 : i;
+  return c.category ? 800 : 1000; // unknown categories before "Other", uncategorized last
+};
+// "4k7" → 4700, "100nF" → 1e-7, "4R7" → 4.7, "16MHz" → 1.6e7. Not a number → Infinity (sorted after).
+const SI = { p: 1e-12, n: 1e-9, u: 1e-6, 'µ': 1e-6, m: 1e-3, k: 1e3, K: 1e3, M: 1e6, G: 1e9, R: 1, r: 1 };
+function valueNum(v) {
+  const m = String(v || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)\s*([pnuµmkKMGRr]?)(\d*)/);
+  if (!m) return Infinity;
+  const n = parseFloat(m[3] ? `${m[1]}.${m[3]}` : m[1]);
+  return n * (SI[m[2]] ?? 1);
+}
+const byCategory = (a, b) => catRank(a) - catRank(b) || catLabel(a).localeCompare(catLabel(b))
+  || valueNum(a.value) - valueNum(b.value) || String(a.package || '').localeCompare(String(b.package || ''), undefined, { numeric: true })
+  || SORTS.pn(a, b);
+
 function componentTable(list, opt = {}) {
   if (!list.length) return `<div class="empty">${opt.empty || 'No components found.'}</div>`;
   const showOwner = opt.owner !== false, showProject = opt.project !== false;
@@ -522,8 +558,11 @@ function componentTable(list, opt = {}) {
       <th class="num">Qty left</th>${showOwner ? '<th>Held by</th>' : ''}${showProject ? '<th>Project</th>' : ''}
       ${opt.date ? '<th>Added</th>' : ''}<th></th>
     </tr></thead>
-    <tbody>${shown.map(c => `<tr class="clickable" data-action="details" data-id="${c.id}" title="Click for details${c.ownerUid === myUid() && c.qty > 0 ? ', Mark taken or Edit' : ''}">
-      <td class="mono strong">${esc(c.partNumber)}</td>
+    <tbody>${shown.map((c, i) => `${opt.catHeads && (i === 0 || catLabel(shown[i - 1]) !== catLabel(c))
+      ? `<tr class="cat-row"><td colspan="${8 + showOwner + showProject + !!opt.date}">${esc(catLabel(c))}
+          <span class="muted">${shown.filter(x => catLabel(x) === catLabel(c)).length}</span></td></tr>` : ''}
+    <tr class="clickable" data-action="details" data-id="${c.id}" title="Click for details${c.ownerUid === myUid() && c.qty > 0 ? ', Mark taken or Edit' : ''}">
+      <td class="mono strong">${esc(c.partNumber)}${opt.newSince != null && c.ownerUid !== myUid() && addedMs(c) > opt.newSince ? ' <span class="tag new">new</span>' : ''}</td>
       <td>${esc(c.value)}</td>
       <td><span class="pkg">${esc(c.package)}</span></td>
       <td class="desc">${esc(c.description)}${c.icType ? ` <span class="tag">${esc(c.icType)}</span>` : ''}</td>
@@ -651,7 +690,7 @@ function renderList(el, cfg) {
       ? `<button class="link" type="button" data-allcats>← All categories</button> · ` : '';
     $('#summary', el).innerHTML = crumb + (st.cat ? `<b>${esc(st.cat === NO_CAT ? 'Uncategorized' : st.cat)}</b> · ` : '') +
       `<b>${list.length}</b> item${list.length === 1 ? '' : 's'} · <b>${pcs.toLocaleString()}</b> pcs` + outNote;
-    $('#results', el).innerHTML = componentTable(list, { date: cfg.date, empty: cfg.empty });
+    $('#results', el).innerHTML = componentTable(list, { date: cfg.date, empty: cfg.empty, newSince: cfg.key === 'new' ? S.newSince : null });
     if (cfg.feed) $('#feed', el).innerHTML = activityFeed();
   };
 
@@ -755,9 +794,9 @@ function renderMy(el) {
     }
     const groups = st.proj ? [st.proj] : uniqSorted(list.map(c => c.project || 'General'));
     $('#results', el).innerHTML = groups.map(p => {
-      const g = list.filter(c => (c.project || 'General') === p);
+      const g = list.filter(c => (c.project || 'General') === p).sort(byCategory); // resistors, then caps, then ICs…
       if (!g.length) return '';
-      return `<div class="group"><h3 class="group-title">${icon('box')} ${esc(p)} <span class="muted small">${g.length} items</span></h3>${componentTable(g, { owner: false, project: false })}</div>`;
+      return `<div class="group"><h3 class="group-title">${icon('box')} ${esc(p)} <span class="muted small">${g.length} items</span></h3>${componentTable(g, { owner: false, project: false, catHeads: true })}</div>`;
     }).join('') || '<div class="empty">No matching components.</div>';
   };
 
