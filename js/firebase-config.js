@@ -29,3 +29,7 @@ export const ADMIN_EMAIL = "adithyan@riodlogic.com";
 
 // Items with quantity below this number (but more than 0) appear in "Low Stock".
 export const LOW_STOCK_THRESHOLD = 3;
+
+// Production accounts. Their components (and anything in a project named "Production") are hidden from
+// other engineers unless they tick "Show production inventory".
+export const PRODUCTION_EMAILS = ["production@riod.in"];

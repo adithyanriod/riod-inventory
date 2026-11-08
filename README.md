@@ -9,6 +9,9 @@ Electronic component inventory for the Riod Logic R&D team.
   Results show the remaining quantity, the engineer who holds the part, and the project.
 - Separate sections for **New Components**, **Low Stock** (fewer than 3 pcs) and **Out of Stock**.
 - **My Inventory** groups your parts by project.
+- **Production inventory**: parts held by `production@riod.in` (or in a project named `Production`) are hidden from
+  other engineers. Tick **Show production inventory** (next to *Include out of stock*) to see them. Production accounts
+  are listed in `PRODUCTION_EMAILS` in `js/firebase-config.js`.
 - **Requests**: ask a teammate for parts. They approve the quantity, and their stock is deducted automatically.
   Owners can also **Mark taken** to record parts used.
 - **Vendors**: the source is *Online* (site name) or a *Vendor*. Saved vendors pop up while you type. A vendor can have

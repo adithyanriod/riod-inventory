@@ -430,3 +430,7 @@ select.missing, input.missing { border-color: var(--bad); background: var(--bad-
   .filters select { max-width: none; flex: 1 1 140px; }
   .req { flex-direction: column; align-items: stretch; }
 }
+
+/* Production inventory */
+.tag.prod { background: var(--warn-soft); color: var(--warn); }
+.prod-chk { padding-left: 10px; border-left: 1px solid var(--border); }

@@ -108,11 +108,15 @@ export function parseQty(s) {
   return parseInt(t, 10);
 }
 
+// ICs and modules share one category. Older data may still say "IC" or "Module".
+export const IC_CAT = 'IC / Module';
+export const isIcCat = c => /^(ic|ics|module|modules|ic ?\/ ?modules?)$/i.test(String(c || '').trim());
+
 const PREFIX_CAT = [
   [/^(RN|RA)$/, 'Resistor'], [/^R$/, 'Resistor'], [/^VR$/, 'Resistor'],
   [/^C$/, 'Capacitor'], [/^FB$/, 'Ferrite Bead'], [/^L$/, 'Inductor'],
   [/^LED$/, 'LED'], [/^D$/, 'Diode'], [/^(Q|T)$/, 'Transistor'],
-  [/^(U|IC)$/, 'IC'], [/^(J|P|CN|CON|X)$/, 'Connector'], [/^Y$/, 'Crystal / Oscillator'],
+  [/^(U|IC)$/, IC_CAT], [/^(J|P|CN|CON|X)$/, 'Connector'], [/^Y$/, 'Crystal / Oscillator'],
   [/^F$/, 'Fuse'], [/^(SW|S)$/, 'Switch'], [/^K$/, 'Relay'], [/^TP$/, 'Test Point'], [/^BT$/, 'Battery'],
 ];
 const WORD_CAT = [
@@ -120,10 +124,14 @@ const WORD_CAT = [
   [/inductor|\bind\b|\bchoke\b/i, 'Inductor'], [/\bled\b/i, 'LED'], [/mosfet|\bfet\b/i, 'MOSFET'], [/transistor|\bbjt\b/i, 'Transistor'],
   [/diode|schottky|zener|\btvs\b/i, 'Diode'], [/connector|header|\bjst\b|terminal/i, 'Connector'],
   [/crystal|oscillator|\bxtal\b/i, 'Crystal / Oscillator'], [/\bfuse\b|polyfuse/i, 'Fuse'],
-  [/switch|button/i, 'Switch'], [/relay/i, 'Relay'], [/sensor/i, 'Sensor'], [/module/i, 'Module'],
-  [/\bic\b|regulator|converter|\bbuck\b|\bboost\b|\bldo\b|mcu|microcontroller|op-?amp|driver|transceiver|eeprom|flash|adc|dac|pmic|charger/i, 'IC'],
+  [/switch|button/i, 'Switch'], [/relay/i, 'Relay'], [/sensor/i, 'Sensor'], 
+  [/\bic\b|regulator|converter|\bbuck\b|\bboost\b|\bldo\b|mcu|microcontroller|op-?amp|driver|transceiver|eeprom|flash|adc|dac|pmic|charger|module/i, IC_CAT],
 ];
 const IC_TYPE = [
+  [/\b(gsm|lte|4g|nb-?iot|cat-?m1?)\b.*module|module.*\b(gsm|lte|4g)\b/i, 'GSM / LTE Module'],
+  [/\b(wi-?fi|ble|bluetooth|esp32|esp8266)\b.*module|module.*\b(wi-?fi|ble|bluetooth)\b/i, 'WiFi / BLE Module'],
+  [/\b(gps|gnss)\b.*module|module.*\b(gps|gnss)\b/i, 'GPS / GNSS Module'], [/\blora\b/i, 'LoRa Module'],
+  [/\b(display|oled|lcd)\b.*module/i, 'Display Module'],
   [/buck-?boost/i, 'Buck-Boost Converter'], [/\bbuck\b|step-?down/i, 'Buck Converter'], [/\bboost\b|step-?up/i, 'Boost Converter'],
   [/\bldo\b/i, 'LDO Regulator'], [/regulator/i, 'Linear Regulator'], [/\bmcu\b|microcontroller/i, 'Microcontroller (MCU)'],
   [/op-?amp|operational/i, 'Op-Amp'], [/comparator/i, 'Comparator'], [/charger/i, 'Battery Charger'],
@@ -134,7 +142,7 @@ const IC_TYPE = [
 ];
 
 export const CATEGORIES = ['Resistor', 'Capacitor', 'Inductor', 'Ferrite Bead', 'Diode', 'LED', 'Transistor', 'MOSFET',
-  'IC', 'Connector', 'Crystal / Oscillator', 'Fuse', 'Switch', 'Relay', 'Sensor', 'Module', 'Battery',
+  IC_CAT, 'Connector', 'Crystal / Oscillator', 'Fuse', 'Switch', 'Relay', 'Sensor', 'Battery',
   'Test Point', 'Mechanical', 'Other'];
 
 // Maps whatever a BOM's category/type column says ("Capacitors", "Chip Resistor", "CAP", "ICs", "Crystal")
@@ -147,7 +155,7 @@ export function normalizeCategory(raw) {
   const exact = CATEGORIES.find(c => forms.includes(c.toLowerCase()));
   if (exact) return exact;
   const SHORT = { r: 'Resistor', res: 'Resistor', c: 'Capacitor', cap: 'Capacitor', l: 'Inductor', ind: 'Inductor',
-    d: 'Diode', q: 'Transistor', u: 'IC', ics: 'IC', xtal: 'Crystal / Oscillator', crystal: 'Crystal / Oscillator',
+    d: 'Diode', q: 'Transistor', u: IC_CAT, ic: IC_CAT, ics: IC_CAT, module: IC_CAT, modules: IC_CAT, 'ic/module': IC_CAT, 'ic / modules': IC_CAT, xtal: 'Crystal / Oscillator', crystal: 'Crystal / Oscillator',
     crystals: 'Crystal / Oscillator', oscillator: 'Crystal / Oscillator', j: 'Connector', conn: 'Connector', f: 'Fuse' };
   if (SHORT[lower]) return SHORT[lower];
   for (const [re, cat] of WORD_CAT) if (re.test(s)) return cat;
@@ -276,7 +284,7 @@ export function buildItems(rows, headerIdx, map) {
     if (!it.partNumber && !it.value && !it.package && !it.description && !it.qty) continue; // empty row
     // Use the file's category only if we recognise it; otherwise detect from designator / description.
     it.category = normalizeCategory(it.category) || guessCategory(designator, `${it.description} ${it.value}`);
-    it.icType = it.category === 'IC' ? guessIcType(it.description) : '';
+    it.icType = isIcCat(it.category) ? guessIcType(it.description) : '';
     it.value = deriveValue(it.description, it.value, it.category);
     items.push(it);
   }
@@ -299,7 +307,7 @@ export function downloadTemplate() {
     ['Part Number', 'Value', 'Package', 'Description', 'Manufacturer', 'Category', 'Designator', 'Source', 'Stock Qty'],
     ['RC0603FR-0710KL', '10k', '0603', 'Resistor 10k 1% 1/10W', 'Yageo', 'Resistor', 'R1', 'LCSC', '100'],
     ['CL10B104KB8NNNC', '100nF', '0603', 'Capacitor MLCC 100nF 50V X7R', 'Samsung', 'Capacitor', 'C1', 'Mouser', '200'],
-    ['TPS62130RGTR', '', 'QFN-16', 'Buck converter 3A 17V', 'Texas Instruments', 'IC', 'U1', 'DigiKey', '5'],
+    ['TPS62130RGTR', '', 'QFN-16', 'Buck converter 3A 17V', 'Texas Instruments', IC_CAT, 'U1', 'DigiKey', '5'],
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [{ wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 34 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 10 }];

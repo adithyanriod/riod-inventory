@@ -1,14 +1,14 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=13';
-import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=13';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=14';
+import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD, PRODUCTION_EMAILS } from './firebase-config.js?v=14';
 const isCompanyEmail = e => COMPANY_DOMAINS.includes(String(e || '').toLowerCase().split('@')[1]);
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=13';
-import * as BOM from './bom.js?v=13';
+} from './util.js?v=14';
+import * as BOM from './bom.js?v=14';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -20,14 +20,13 @@ const {
 // ---------------------------------------------------------------------
 //  Constants
 // ---------------------------------------------------------------------
-const CATEGORIES = ['Resistor', 'Capacitor', 'Inductor', 'Ferrite Bead', 'Diode', 'LED', 'Transistor', 'MOSFET',
-  'IC', 'Connector', 'Crystal / Oscillator', 'Fuse', 'Switch', 'Relay', 'Sensor', 'Module', 'Battery',
-  'Test Point', 'Mechanical', 'Other'];
+const CATEGORIES = BOM.CATEGORIES; // "IC / Module" covers ICs and modules
 const IC_TYPES = ['Microcontroller (MCU)', 'Buck Converter', 'Boost Converter', 'Buck-Boost Converter',
   'LDO Regulator', 'Linear Regulator', 'PMIC', 'Battery Charger', 'Op-Amp', 'Comparator', 'ADC', 'DAC',
   'Gate Driver', 'Motor Driver', 'LED Driver', 'Load Switch', 'eFuse / Protection', 'ESD / TVS',
   'Interface (UART/RS-485/CAN)', 'USB Interface', 'Ethernet PHY', 'RF / Wireless', 'Memory (EEPROM/Flash)',
-  'Logic', 'Level Shifter', 'Sensor IC', 'Clock / Timer', 'Voltage Reference', 'Audio', 'Other'];
+  'Logic', 'Level Shifter', 'Sensor IC', 'Clock / Timer', 'Voltage Reference', 'Audio',
+  'GSM / LTE Module', 'WiFi / BLE Module', 'GPS / GNSS Module', 'LoRa Module', 'Power Module', 'Display Module', 'Sensor Module', 'Other'];
 const PACKAGES = ['01005', '0201', '0402', '0603', '0805', '1206', '1210', '1812', '2010', '2512',
   'SOD-123', 'SOD-323', 'SOD-523', 'SMA', 'SMB', 'SMC', 'SOT-23', 'SOT-23-5', 'SOT-23-6', 'SOT-223',
   'SOT-89', 'SOT-363', 'TO-252 (DPAK)', 'TO-263 (D2PAK)', 'TO-220', 'SOIC-8', 'SOIC-14', 'SOIC-16',
@@ -40,7 +39,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 13;
+const APP_VERSION = 14;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -68,6 +67,19 @@ const myUid = () => S.profile?.uid;
 const findComp = id => S.components.find(c => c.id === id);
 const isLow = c => c.qty > 0 && c.qty < LOW_STOCK_THRESHOLD;
 const isOut = c => c.qty <= 0;
+
+// ---- Production inventory ----
+// Parts held by a production account (PRODUCTION_EMAILS), or in a project named "Production", are hidden
+// from other engineers unless they tick "Show production inventory". Your own parts are never hidden.
+const PROD_EMAILS = new Set(PRODUCTION_EMAILS.map(e => e.toLowerCase()));
+const isProdProject = p => String(p || '').trim().toLowerCase() === 'production';
+const isProduction = c => (S.prodUids?.has(c.ownerUid) ?? false) || isProdProject(c.project);
+const iAmProduction = () => PROD_EMAILS.has(String(S.profile?.email || '').toLowerCase());
+let showProd = false;
+try { showProd = localStorage.getItem('riod.showProd') === '1'; } catch { /* ignore */ }
+const hideProd = c => !showProd && c.ownerUid !== myUid() && isProduction(c);
+const hideProdActivity = a => !showProd && a.byUid !== myUid() && ((S.prodUids?.has(a.byUid) ?? false) || isProdProject(a.project));
+const visibleComps = () => S.components.filter(c => !hideProd(c));
 const qtyClass = q => (q <= 0 ? 'out' : q < LOW_STOCK_THRESHOLD ? 'low' : 'ok');
 const vp = x => [x.value, x.package].filter(Boolean).join(' '); // "10k 0603", or just "QFN-16" for an IC
 // Two entries are "the same component" only if part number, project AND value match.
@@ -254,7 +266,8 @@ function subscribe() {
   add(onSnapshot(collection(db, 'components'), snap => {
     S.components = snap.docs.map(d => {
       const x = d.data();
-      return { id: d.id, ...x, qty: Number(x.qty) || 0 };
+      // Older parts saved as "IC" or "Module" show under "IC / Module".
+      return { id: d.id, ...x, qty: Number(x.qty) || 0, category: BOM.isIcCat(x.category) ? BOM.IC_CAT : (x.category || '') };
     });
     scheduleRender();
   }, onSyncError('components')));
@@ -268,6 +281,7 @@ function subscribe() {
   add(onSnapshot(collection(db, 'users'), snap => {
     S.users = snap.docs.map(d => ({ id: d.id, ...d.data() }))
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    S.prodUids = new Set(S.users.filter(u => PROD_EMAILS.has(String(u.email || '').toLowerCase())).map(u => u.id));
     scheduleRender();
   }, onSyncError('users')));
 
@@ -282,6 +296,7 @@ function subscribe() {
       if (a.byUid === uid) continue;
       const t = toDate(a.createdAt);
       if (!t || t.getTime() < S.loginTime - 5000) continue;
+      if (hideProdActivity(a)) continue; // production stock stays quiet unless you chose to see it
       if (a.type === 'add') notify('New component added', `${a.byName} added ${[a.qty, a.value, a.package].filter(Boolean).join(' ')}, ${a.description}`);
       if (a.type === 'bom') notify('New components added', `${a.byName} added ${a.count} components (${a.totalQty} pcs) from a BOM — project ${a.project}`);
     }
@@ -361,9 +376,9 @@ async function requestNotify() {
 // ---------------------------------------------------------------------
 const NAV = [
   { id: 'search', label: 'Search Inventory', icon: 'search' },
-  { id: 'new', label: 'New Components', icon: 'sparkle', count: () => S.components.filter(c => isRecent(c, 7)).length, cls: 'accent' },
-  { id: 'low', label: 'Low Stock', icon: 'alert', count: () => S.components.filter(isLow).length, cls: 'warn' },
-  { id: 'out', label: 'Out of Stock', icon: 'out', count: () => S.components.filter(isOut).length, cls: 'danger' },
+  { id: 'new', label: 'New Components', icon: 'sparkle', count: () => visibleComps().filter(c => isRecent(c, 7)).length, cls: 'accent' },
+  { id: 'low', label: 'Low Stock', icon: 'alert', count: () => visibleComps().filter(isLow).length, cls: 'warn' },
+  { id: 'out', label: 'Out of Stock', icon: 'out', count: () => visibleComps().filter(isOut).length, cls: 'danger' },
   { sep: 'My work', engineer: true },
   { id: 'my', label: 'My Inventory', icon: 'box', engineer: true },
   { id: 'add', label: 'Add Component', icon: 'plus', engineer: true },
@@ -513,7 +528,7 @@ function componentTable(list, opt = {}) {
       <td>${esc(c.category || '')}</td>
       <td>${esc(c.manufacturer || '')}</td>
       <td class="num"><span class="qty ${qtyClass(c.qty)}">${c.qty}</span></td>
-      ${showOwner ? `<td>${esc(c.ownerName)}${c.ownerUid === myUid() ? ' <span class="you">you</span>' : ''}</td>` : ''}
+      ${showOwner ? `<td>${esc(c.ownerName)}${c.ownerUid === myUid() ? ' <span class="you">you</span>' : ''}${isProduction(c) ? ' <span class="tag prod">production</span>' : ''}</td>` : ''}
       ${showProject ? `<td>${esc(c.project || '')}</td>` : ''}
       ${opt.date ? `<td class="nowrap" title="${esc(fmtDateTime(c.lastAddedAt || c.createdAt))}">${esc(timeAgo(c.lastAddedAt || c.createdAt))}</td>` : ''}
       <td class="actions">${rowActions(c)}</td>
@@ -574,6 +589,7 @@ function renderList(el, cfg) {
             .map(([v, l]) => `<option value="${v}" ${st.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
         ${cfg.outToggle ? `<label class="chk"><input type="checkbox" id="f-out" ${st.out ? 'checked' : ''}> Include out of stock</label>` : ''}
+        ${iAmProduction() ? '' : `<label class="chk prod-chk" title="Show parts held by the production team"><input type="checkbox" id="f-prod" ${showProd ? 'checked' : ''}> Show production inventory</label>`}
       </div>
     </div>
     <div id="summary" class="summary"></div>
@@ -586,7 +602,9 @@ function renderList(el, cfg) {
   };
 
   const update = () => {
-    const base = S.components.filter(cfg.predicate(st));
+    const pred = cfg.predicate(st);
+    const prodHidden = S.components.filter(c => pred(c) && hideProd(c)).length;
+    const base = visibleComps().filter(pred);
     fill('f-pkg', 'All sizes / packages', uniqSorted(base.map(c => c.package)), st.pkg);
     fill('f-cat', 'All categories', uniqSorted(base.map(c => c.category)), st.cat);
     fill('f-owner', 'All engineers', uniqSorted(base.map(c => c.ownerName)), st.owner);
@@ -600,7 +618,8 @@ function renderList(el, cfg) {
     if (cfg.outToggle && !st.out) { const before = list.length; list = list.filter(c => c.qty > 0); hiddenOut = before - list.length; }
     list.sort(SORTS[st.sort] || SORTS.pn);
     const pcs = list.reduce((s, c) => s + c.qty, 0);
-    const outNote = hiddenOut ? ` · <span class="muted">${hiddenOut} out-of-stock hidden (see <a href="#out">Out of Stock</a>)</span>` : '';
+    const outNote = (hiddenOut ? ` · <span class="muted">${hiddenOut} out-of-stock hidden (see <a href="#out">Out of Stock</a>)</span>` : '') +
+      (prodHidden ? ` · <span class="muted">${prodHidden} production item${prodHidden === 1 ? '' : 's'} hidden</span>` : '');
 
     // Search page with nothing typed or filtered: show categories instead of every component.
     const browsing = cfg.categories && !st.q.trim() && !st.cat && !st.pkg && !st.owner && !st.proj && !st.showAll;
@@ -640,6 +659,11 @@ function renderList(el, cfg) {
     $('#' + id, el).addEventListener('change', e => { st[k] = e.target.value; update(); });
   $('#f-days', el)?.addEventListener('change', e => { st.days = Number(e.target.value); update(); });
   $('#f-out', el)?.addEventListener('change', e => { st.out = e.target.checked; update(); });
+  $('#f-prod', el)?.addEventListener('change', e => {
+    showProd = e.target.checked; // applies to every list and the menu counts, and is remembered
+    try { localStorage.setItem('riod.showProd', showProd ? '1' : '0'); } catch { /* ignore */ }
+    update(); updateNavCounts();
+  });
   // (#view itself lives across pages, so listen on its fresh children, not on el)
   const onNav = e => {
     const tile = e.target.closest('[data-cat]');
@@ -655,7 +679,7 @@ function renderList(el, cfg) {
 }
 
 function activityFeed() {
-  const items = S.activity.slice(0, 8);
+  const items = S.activity.filter(a => !hideProdActivity(a)).slice(0, 8);
   if (!items.length) return '';
   return `<div class="card feed"><h4>Recent activity</h4><ul>${items.map(a => {
     const who = `<b>${esc(a.byName)}</b>`;
@@ -738,7 +762,7 @@ function renderMy(el) {
 function componentFields(c = {}, editing = false) {
   // Fixed 4-column layout. "IC type" takes the Value slot for ICs (ICs don't need a value),
   // so nothing jumps around when the category changes.
-  const isIC = c.category === 'IC';
+  const isIC = BOM.isIcCat(c.category);
   const need = BOM.needsValue(c.category);
   return `
   <div class="cf-grid">
@@ -747,7 +771,7 @@ function componentFields(c = {}, editing = false) {
     <label>Category<select name="category"><option value="">— Select —</option>${CATEGORIES.map(x => `<option ${c.category === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}${c.category && !CATEGORIES.includes(c.category) ? `<option selected>${esc(c.category)}</option>` : ''}</select></label>
     <label class="span4">Description <i>*</i><input name="description" required value="${esc(c.description)}" placeholder="What part is it, e.g. Resistor 10k 1% 1/10W, or Buck converter 3A 17V input"></label>
     <label class="val-only ${isIC ? 'hidden' : ''}">Value <i class="val-req ${need ? '' : 'hidden'}">*</i><span class="val-opt opt ${need ? 'hidden' : ''}">(R, L, C only)</span><input name="value" value="${esc(c.value)}" placeholder="10k, 100nF, 4.7uH"></label>
-    <label class="ic-only ${isIC ? '' : 'hidden'}">IC type<input name="icType" list="dl-ictypes" value="${esc(c.icType)}" placeholder="Buck, LDO, MCU…"></label>
+    <label class="ic-only ${isIC ? '' : 'hidden'}">IC / Module type<input name="icType" list="dl-ictypes" value="${esc(c.icType)}" placeholder="Buck, LDO, MCU, GSM module…"></label>
     <label>Package / Size <i>*</i><input name="package" list="dl-packages" required value="${esc(c.package)}" placeholder="0402, 0603, SOT-23"></label>
     <label>${editing ? 'Qty in stock' : 'Quantity'} <i>*</i><input name="qty" type="number" min="0" step="1" required value="${c.qty ?? ''}" placeholder="0"></label>
     <label>Project<input name="project" list="dl-projects" value="${esc(c.project)}" placeholder="General"></label>
@@ -769,13 +793,13 @@ function wireComponentForm(form) {
     val.placeholder = need ? '10k, 100nF, 4.7uH, 16MHz' : 'Not needed for this part';
     if (need && !val.value.trim()) val.value = BOM.extractValue(desc.value, cat.value);
   };
-  cat.addEventListener('change', () => { showIc(cat.value === 'IC'); syncValue(); });
+  cat.addEventListener('change', () => { showIc(BOM.isIcCat(cat.value)); syncValue(); });
   desc.addEventListener('blur', () => {
     if (!cat.value) {
       const g = BOM.guessCategory('', `${desc.value} ${val.value}`);
       if (g) {
-        cat.value = g; showIc(g === 'IC');
-        if (g === 'IC' && !form.querySelector('[name=icType]').value) form.querySelector('[name=icType]').value = BOM.guessIcType(desc.value);
+        cat.value = g; showIc(BOM.isIcCat(g));
+        if (BOM.isIcCat(g) && !form.querySelector('[name=icType]').value) form.querySelector('[name=icType]').value = BOM.guessIcType(desc.value);
       }
     }
     syncValue();
@@ -787,7 +811,7 @@ function readComponentForm(form) {
   const qtyRaw = g('qty');
   return {
     partNumber: g('partNumber'), value: g('value'), package: g('package'), description: g('description'),
-    category: g('category'), icType: g('category') === 'IC' ? g('icType') : '', manufacturer: g('manufacturer'),
+    category: g('category'), icType: BOM.isIcCat(g('category')) ? g('icType') : '', manufacturer: g('manufacturer'),
     qty: /^\d+$/.test(qtyRaw) ? parseInt(qtyRaw, 10) : NaN,
     project: g('project') || 'General',
   };
@@ -1189,7 +1213,7 @@ function renderImport(el) {
       if (!t.classList.contains('cell')) return;
       const it = st.items[Number(t.dataset.i)];
       it[t.dataset.k] = t.value;
-      if (t.dataset.k === 'category') it.icType = t.value.trim() === 'IC' ? BOM.guessIcType(it.description) : '';
+      if (t.dataset.k === 'category') it.icType = BOM.isIcCat(t.value) ? BOM.guessIcType(it.description) : '';
       if ((t.dataset.k === 'category' || t.dataset.k === 'description') && BOM.needsValue(it.category) && !String(it.value).trim()) {
         it.value = BOM.extractValue(it.description, it.category); // e.g. category changed to Resistor -> read "10k" from description
         const vInp = $(`input.cell[data-i="${t.dataset.i}"][data-k="value"]`, pv);
