@@ -12,6 +12,9 @@ Electronic component inventory for the Riod Logic R&D team.
 - **Production inventory**: parts held by `production@riod.in` (or in a project named `Production`) are hidden from
   other engineers. Tick **Show production inventory** (next to *Include out of stock*) to see them. Production accounts
   are listed in `PRODUCTION_EMAILS` in `js/firebase-config.js`.
+  The production team can **Release for common use** (one part from its details, or several selected in My Inventory),
+  which makes them visible to everyone, and **Make production-only** to revert.
+- **Select several parts** in My Inventory with **Ctrl+click** / **Shift+click** (like in Windows), then delete them together.
 - **Requests**: ask a teammate for parts. They approve the quantity, and their stock is deducted automatically.
   Owners can also **Mark taken** to record parts used.
 - **Vendors**: the source is *Online* (site name) or a *Vendor*. Saved vendors pop up while you type. A vendor can have

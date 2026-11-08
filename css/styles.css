@@ -449,3 +449,14 @@ select.missing, input.missing { border-color: var(--bad); background: var(--bad-
 .tag.prod { background: var(--warn-soft); color: var(--warn); }
 .prod-chk { padding-left: 10px; border-left: 1px solid var(--border); }
 .tag.new { background: var(--primary-soft); color: var(--primary); font-family: inherit; font-weight: 700; text-transform: uppercase; font-size: 10.5px; }
+.tag.rel { background: var(--ok-soft); color: var(--ok); }
+
+/* My Inventory multi-select (Ctrl / Shift + click) */
+.selectable .tbl tr.clickable { user-select: none; }
+.tbl tbody tr.selected, .tbl tbody tr.selected:hover { background: var(--primary-soft); }
+.tbl tbody tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
+.sel-bar { position: sticky; top: 64px; z-index: 15; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  background: var(--surface); border: 1px solid var(--primary); border-radius: var(--radius); padding: 8px 12px;
+  margin-bottom: 12px; box-shadow: var(--shadow); }
+.sel-bar > span { margin-right: auto; }
+kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface-2); }

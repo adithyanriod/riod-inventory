@@ -1,14 +1,14 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=17';
-import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD, PRODUCTION_EMAILS } from './firebase-config.js?v=17';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=18';
+import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD, PRODUCTION_EMAILS } from './firebase-config.js?v=18';
 const isCompanyEmail = e => COMPANY_DOMAINS.includes(String(e || '').toLowerCase().split('@')[1]);
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=17';
-import * as BOM from './bom.js?v=17';
+} from './util.js?v=18';
+import * as BOM from './bom.js?v=18';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -39,7 +39,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 17;
+const APP_VERSION = 18;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -71,14 +71,16 @@ const isOut = c => c.qty <= 0;
 // ---- Production inventory ----
 // Parts held by a production account (PRODUCTION_EMAILS), or in a project named "Production", are hidden
 // from other engineers unless they tick "Show production inventory". Your own parts are never hidden.
+// The production team can "release" parts for common use (released: true); released parts show for everyone.
 const PROD_EMAILS = new Set(PRODUCTION_EMAILS.map(e => e.toLowerCase()));
 const isProdProject = p => String(p || '').trim().toLowerCase() === 'production';
-const isProduction = c => (S.prodUids?.has(c.ownerUid) ?? false) || isProdProject(c.project);
+const isProdStock = c => (S.prodUids?.has(c.ownerUid) ?? false) || isProdProject(c.project); // production's, released or not
+const isProduction = c => isProdStock(c) && !c.released;                                           // production-only
 const iAmProduction = () => PROD_EMAILS.has(String(S.profile?.email || '').toLowerCase());
 let showProd = false;
 try { showProd = localStorage.getItem('riod.showProd') === '1'; } catch { /* ignore */ }
 const hideProd = c => !showProd && c.ownerUid !== myUid() && isProduction(c);
-const hideProdActivity = a => !showProd && a.byUid !== myUid() && ((S.prodUids?.has(a.byUid) ?? false) || isProdProject(a.project));
+const hideProdActivity = a => a.type !== 'release' && !showProd && a.byUid !== myUid() && ((S.prodUids?.has(a.byUid) ?? false) || isProdProject(a.project));
 const visibleComps = () => S.components.filter(c => !hideProd(c));
 const qtyClass = q => (q <= 0 ? 'out' : q < LOW_STOCK_THRESHOLD ? 'low' : 'ok');
 const vp = x => [x.value, x.package].filter(Boolean).join(' '); // "10k 0603", or just "QFN-16" for an IC
@@ -214,6 +216,8 @@ function wireShell() {
     try { localStorage.setItem('riod.notifyDismissed', '1'); } catch { /* ignore */ }
   });
   window.addEventListener('hashchange', () => { if (S.profile) route(); });
+  // Esc clears a multi-selection (when no dialog is open)
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.clearSel && !$('#modalRoot').children.length) S.clearSel(); });
 
   // Every button with data-action inside the main view
   $('#view').addEventListener('click', e => {
@@ -301,6 +305,7 @@ function subscribe() {
       if (hideProdActivity(a)) continue; // production stock stays quiet unless you chose to see it
       if (a.type === 'add') notify('New component added', `${a.byName} added ${[a.qty, a.value, a.package].filter(Boolean).join(' ')}, ${a.description}`);
       if (a.type === 'bom') notify('New components added', `${a.byName} added ${a.count} components (${a.totalQty} pcs) from a BOM — project ${a.project}`);
+      if (a.type === 'release') notify('Production parts released', `${a.byName} released ${a.count} component${a.count === 1 ? '' : 's'} (${a.totalQty} pcs) for common use`);
     }
     scheduleRender();
   }, onSyncError('activity')));
@@ -449,6 +454,7 @@ function route() {
   el.innerHTML = '';
   if (v === 'new' && S.route !== 'new') S.newSince = newSeenAt(); // rows newer than this get a "new" tag
   S.route = v;
+  S.clearSel = null;
   S.viewUpdate = null;
   S.viewUpdate = VIEWS[v].render(el) || null;
   updateNavCounts();
@@ -565,11 +571,11 @@ function componentTable(list, opt = {}) {
       <td class="mono strong">${esc(c.partNumber)}${opt.newSince != null && c.ownerUid !== myUid() && addedMs(c) > opt.newSince ? ' <span class="tag new">new</span>' : ''}</td>
       <td>${esc(c.value)}</td>
       <td><span class="pkg">${esc(c.package)}</span></td>
-      <td class="desc">${esc(c.description)}${c.icType ? ` <span class="tag">${esc(c.icType)}</span>` : ''}</td>
+      <td class="desc">${esc(c.description)}${c.icType ? ` <span class="tag">${esc(c.icType)}</span>` : ''}${isProduction(c) ? ' <span class="tag prod" title="Production stock, not released">production</span>' : isProdStock(c) ? ' <span class="tag rel" title="Released by production for common use">released</span>' : ''}</td>
       <td>${esc(c.category || '')}</td>
       <td>${esc(c.manufacturer || '')}</td>
       <td class="num"><span class="qty ${qtyClass(c.qty)}">${c.qty}</span></td>
-      ${showOwner ? `<td>${esc(c.ownerName)}${c.ownerUid === myUid() ? ' <span class="you">you</span>' : ''}${isProduction(c) ? ' <span class="tag prod">production</span>' : ''}</td>` : ''}
+      ${showOwner ? `<td>${esc(c.ownerName)}${c.ownerUid === myUid() ? ' <span class="you">you</span>' : ''}</td>` : ''}
       ${showProject ? `<td>${esc(c.project || '')}</td>` : ''}
       ${opt.date ? `<td class="nowrap" title="${esc(fmtDateTime(c.lastAddedAt || c.createdAt))}">${esc(timeAgo(c.lastAddedAt || c.createdAt))}</td>` : ''}
       <td class="actions">${rowActions(c)}</td>
@@ -724,7 +730,9 @@ function activityFeed() {
   if (!items.length) return '';
   return `<div class="card feed"><h4>Recent activity</h4><ul>${items.map(a => {
     const who = `<b>${esc(a.byName)}</b>`;
-    const txt = a.type === 'bom'
+    const txt = a.type === 'release'
+      ? `${who} released <b>${a.count}</b> production component${a.count === 1 ? '' : 's'} (${a.totalQty} pcs) for common use`
+      : a.type === 'bom'
       ? `${who} imported <b>${a.count}</b> components (${a.totalQty} pcs) into <b>${esc(a.project)}</b>`
       : `${who} added <b>${a.qty}</b> × ${esc(vp(a))} — ${esc(a.description)} <span class="muted">(${esc(a.partNumber)})</span>`;
     return `<li>${txt}<span class="muted small"> · ${esc(timeAgo(a.createdAt))}</span></li>`;
@@ -757,9 +765,61 @@ function renderMy(el) {
           <a class="btn" href="#import">Import BOM</a>
         </div>
         <div id="summary" class="summary"></div>
-        <div id="results"></div>
+        <div id="selBar" class="sel-bar hidden"></div>
+        <div id="results" class="selectable"></div>
       </section>
     </div>`;
+
+  // ---- Multi-select like on a PC: Ctrl+click adds/removes a row, Shift+click selects a range ----
+  const sel = new Set();
+  let anchor = null;
+  const rowIds = () => $$('#results tr.clickable', el).map(tr => tr.dataset.id);
+  const paintSel = () => {
+    for (const id of [...sel]) { const c = findComp(id); if (!c || c.ownerUid !== myUid()) sel.delete(id); }
+    $$('#results tr.clickable', el).forEach(tr => tr.classList.toggle('selected', sel.has(tr.dataset.id)));
+    const bar = $('#selBar', el);
+    if (!sel.size) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+    const list = [...sel].map(findComp);
+    const pcs = list.reduce((s, c) => s + c.qty, 0);
+    const toRelease = list.filter(c => canRelease(c) && !c.released).length;
+    const toRevert = list.filter(c => canRelease(c) && c.released).length;
+    bar.innerHTML = `<span><b>${sel.size}</b> selected · ${pcs.toLocaleString()} pcs</span>
+      ${toRelease ? `<button class="btn sm primary" type="button" data-bulk="release">Release for common use (${toRelease})</button>` : ''}
+      ${toRevert ? `<button class="btn sm" type="button" data-bulk="revert">Make production-only (${toRevert})</button>` : ''}
+      <button class="btn sm danger" type="button" data-bulk="delete">Delete ${sel.size}</button>
+      <button class="btn sm ghost" type="button" data-bulk="all">Select all shown</button>
+      <button class="btn sm ghost" type="button" data-bulk="clear">Clear (Esc)</button>`;
+    bar.classList.remove('hidden');
+  };
+  const clearSel = () => { sel.clear(); anchor = null; paintSel(); };
+  S.clearSel = clearSel; // Esc (see wireShell)
+  $('#results', el).addEventListener('mousedown', e => { if (e.shiftKey && e.target.closest('tr.clickable')) e.preventDefault(); }); // no text highlight
+  $('#results', el).addEventListener('click', e => {
+    const tr = e.target.closest('tr.clickable');
+    if (!tr || e.target.closest('button') || !(e.ctrlKey || e.metaKey || e.shiftKey)) return; // plain click opens details
+    e.stopPropagation(); // don't open details
+    const id = tr.dataset.id;
+    if (e.shiftKey && anchor) {
+      const ids = rowIds(), a = ids.indexOf(anchor), b = ids.indexOf(id);
+      if (!(e.ctrlKey || e.metaKey)) sel.clear();
+      if (a >= 0 && b >= 0) ids.slice(Math.min(a, b), Math.max(a, b) + 1).forEach(x => sel.add(x));
+      else sel.add(id);
+    } else {
+      if (sel.has(id)) sel.delete(id); else sel.add(id);
+      anchor = id;
+    }
+    paintSel();
+  });
+  $('#selBar', el).addEventListener('click', async e => {
+    const b = e.target.closest('[data-bulk]');
+    if (!b) return;
+    const list = [...sel].map(findComp).filter(Boolean);
+    const act = b.dataset.bulk;
+    if (act === 'clear') return clearSel();
+    if (act === 'all') { rowIds().forEach(x => sel.add(x)); return paintSel(); }
+    const done = act === 'delete' ? await deleteComps(list) : await setReleased(list, act === 'release');
+    if (done) clearSel();
+  });
 
   const layout = $('.my-layout', el);
   const menu = $('#projMenu', el), btn = $('#projBtn', el);
@@ -787,7 +847,8 @@ function renderMy(el) {
     const pcs = list.reduce((s, c) => s + c.qty, 0);
     const lowN = list.filter(isLow).length, outN = list.filter(isOut).length;
     $('#summary', el).innerHTML = `<b>${list.length}</b> items · <b>${pcs.toLocaleString()}</b> pcs` +
-      (lowN ? ` · <span class="text-warn">${lowN} low</span>` : '') + (outN ? ` · <span class="text-bad">${outN} out of stock</span>` : '');
+      (lowN ? ` · <span class="text-warn">${lowN} low</span>` : '') + (outN ? ` · <span class="text-bad">${outN} out of stock</span>` : '') +
+      (list.length > 1 ? ` · <span class="muted">Tip: <kbd>Ctrl</kbd>+click or <kbd>Shift</kbd>+click to select several</span>` : '');
     if (!mine.length) {
       $('#results', el).innerHTML = `<div class="empty">You have not added any components yet.<br><a href="#add">Add a component</a> or <a href="#import">import a BOM</a>.</div>`;
       return;
@@ -798,6 +859,7 @@ function renderMy(el) {
       if (!g.length) return '';
       return `<div class="group"><h3 class="group-title">${icon('box')} ${esc(p)} <span class="muted small">${g.length} items</span></h3>${componentTable(g, { owner: false, project: false, catHeads: true })}</div>`;
     }).join('') || '<div class="empty">No matching components.</div>';
+    paintSel();
   };
 
   $('#projToggle', el).addEventListener('click', () => { setCollapsed(true); update(); });
@@ -1557,6 +1619,53 @@ function renderImport(el) {
 const kv = (label, val, raw = false) =>
   `<div class="kv"><span>${esc(label)}</span><div>${raw ? val : esc(val || '—')}</div></div>`;
 
+// ---- Release production stock for common use / revert; delete several at once ----
+// Writes in batches (Firestore allows up to 500 writes per batch).
+async function batchWrite(list, op) {
+  for (let i = 0; i < list.length; i += 400) {
+    const b = writeBatch(db);
+    for (const c of list.slice(i, i + 400)) op(b, doc(db, 'components', c.id), c);
+    await b.commit();
+  }
+}
+const canRelease = c => c.ownerUid === myUid() && isProdStock(c);
+async function setReleased(list, release) {
+  list = list.filter(c => canRelease(c) && !!c.released !== release);
+  if (!list.length) { toast(release ? 'Those parts are already released.' : 'Those parts are already production-only.'); return false; }
+  const pcs = list.reduce((s, c) => s + c.qty, 0);
+  const what = list.length === 1 ? `<b>${esc(list[0].partNumber)}</b>` : `<b>${list.length}</b> components (${pcs.toLocaleString()} pcs)`;
+  const ok = release
+    ? await confirmDialog('Release for common use', `Release ${what} for common use?<br>All engineers will see them and can request them.`, 'Release')
+    : await confirmDialog('Make production-only', `Make ${what} production-only again?<br>Other engineers will no longer see them (unless they tick "Show production inventory").`, 'Make production-only');
+  if (!ok) return false;
+  try {
+    await batchWrite(list, (b, ref) => b.update(ref, release
+      ? { released: true, releasedAt: serverTimestamp(), releasedBy: S.profile.name, lastAddedAt: serverTimestamp(), updatedAt: serverTimestamp() }
+      : { released: false, updatedAt: serverTimestamp() }));
+    if (release) await addDoc(collection(db, 'activity'), {
+      type: 'release', byUid: myUid(), byName: S.profile.name, count: list.length, totalQty: pcs,
+      project: uniqSorted(list.map(c => c.project)).join(', '), createdAt: serverTimestamp(),
+    });
+    toast(release ? `Released ${list.length} component${list.length === 1 ? '' : 's'} for common use.` : `${list.length} component${list.length === 1 ? ' is' : 's are'} production-only again.`, 'success');
+    return true;
+  } catch (err) { console.error(err); toast('Could not update: ' + err.message, 'error', 8000); return false; }
+}
+async function deleteComps(list) {
+  list = list.filter(c => c.ownerUid === myUid());
+  if (!list.length) return false;
+  const pcs = list.reduce((s, c) => s + c.qty, 0);
+  const ok = await confirmDialog('Delete components',
+    `Delete <b>${list.length}</b> component${list.length === 1 ? '' : 's'} (${pcs.toLocaleString()} pcs) from your inventory?<br>
+     <span class="muted small">${list.slice(0, 8).map(c => esc(c.partNumber)).join(', ')}${list.length > 8 ? ` and ${list.length - 8} more` : ''}</span><br>This cannot be undone.`,
+    `Delete ${list.length}`, true);
+  if (!ok) return false;
+  try {
+    await batchWrite(list, (b, ref) => b.delete(ref));
+    toast(`Deleted ${list.length} component${list.length === 1 ? '' : 's'}.`, 'success');
+    return true;
+  } catch (err) { console.error(err); toast('Could not delete: ' + err.message, 'error', 8000); return false; }
+}
+
 async function showDetails(c) {
   if (!c) { toast('This component no longer exists.', 'error'); return; }
   const v = c.sourceType === 'vendor' && c.vendorId ? S.vendors.find(x => x.id === c.vendorId) : null;
@@ -1565,6 +1674,9 @@ async function showDetails(c) {
   if (!mine && c.qty > 0) actions.push({ label: 'Request this part', cls: 'primary', onClick: () => { setTimeout(() => showRequestModal(c)); } });
   if (mine && c.qty > 0) actions.push({ label: 'Mark taken', cls: 'primary', onClick: () => { setTimeout(() => showTakeModal(c)); } });
   if (mine) actions.push({ label: c.qty > 0 ? 'Edit' : 'Restock / Edit', onClick: () => { setTimeout(() => showEditModal(c)); } });
+  if (canRelease(c)) actions.push(c.released
+    ? { label: 'Make production-only', cls: 'left', onClick: () => { setTimeout(() => setReleased([c], false)); } }
+    : { label: 'Release for common use', cls: 'left', onClick: () => { setTimeout(() => setReleased([c], true)); } });
   actions.push({ label: 'Close', cls: 'ghost' });
   const m = openModal({
     title: c.partNumber, wide: true, actions,
