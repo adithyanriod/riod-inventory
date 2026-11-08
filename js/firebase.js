@@ -1,5 +1,5 @@
 // Firebase initialisation (loaded from Google's CDN — no build step needed)
-import { firebaseConfig } from './firebase-config.js?v=12';
+import { firebaseConfig } from './firebase-config.js?v=13';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import * as A from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import * as F from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';

@@ -1,14 +1,14 @@
 // =====================================================================
 //  Riod Inventory — main application
 // =====================================================================
-import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=12';
-import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=12';
+import { auth, db, fb, createAuthUser, callFn, isConfigured } from './firebase.js?v=13';
+import { COMPANY_DOMAINS, ADMIN_EMAIL, LOW_STOCK_THRESHOLD } from './firebase-config.js?v=13';
 const isCompanyEmail = e => COMPANY_DOMAINS.includes(String(e || '').toLowerCase().split('@')[1]);
 import {
   $, $$, esc, normValue, fmtDate, fmtDateTime, timeAgo, toDate, debounce, toast,
   openModal, confirmDialog, uniqSorted
-} from './util.js?v=12';
-import * as BOM from './bom.js?v=12';
+} from './util.js?v=13';
+import * as BOM from './bom.js?v=13';
 
 const {
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail,
@@ -40,7 +40,7 @@ const TX_LABEL = { added: 'Added', import: 'Imported (BOM)', restock: 'Restocked
   request: 'Given on request', adjust: 'Qty adjusted' };
 const MAX_ROWS = 500;
 // Bump together with the ?v= numbers in index.html and the imports when publishing, so browsers load the new files.
-const APP_VERSION = 12;
+const APP_VERSION = 13;
 
 const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -186,7 +186,13 @@ function wireShell() {
     if (b.dataset.menu === 'password') showPasswordModal();
     if (b.dataset.menu === 'notify') requestNotify();
   });
-  $('#menuToggle').addEventListener('click', () => $('#app').classList.toggle('nav-open'));
+  // ☰ : on a phone it slides the menu in/out; on a PC it collapses the menu to icons only (remembered).
+  try { if (localStorage.getItem('riod.navCollapsed') === '1') $('#app').classList.add('nav-collapsed'); } catch { /* ignore */ }
+  $('#menuToggle').addEventListener('click', () => {
+    if (window.matchMedia('(max-width: 820px)').matches) { $('#app').classList.toggle('nav-open'); return; }
+    const c = $('#app').classList.toggle('nav-collapsed');
+    try { localStorage.setItem('riod.navCollapsed', c ? '1' : '0'); } catch { /* ignore */ }
+  });
   $('#nav').addEventListener('click', e => { if (e.target.closest('a')) $('#app').classList.remove('nav-open'); });
   $('#enableNotify').addEventListener('click', requestNotify);
   $('#dismissNotify').addEventListener('click', () => {
@@ -372,7 +378,7 @@ const navVisible = n => !(n.admin && !S.isAdmin);
 function buildNav() {
   $('#nav').innerHTML = NAV.filter(navVisible).map(n => n.sep
     ? `<div class="nav-sep">${esc(n.sep)}</div>`
-    : `<a href="#${n.id}" data-nav="${n.id}">${icon(n.icon)}<span>${esc(n.label)}</span>${n.count ? `<b class="count ${n.cls || ''}" data-count="${n.id}"></b>` : ''}</a>`
+    : `<a href="#${n.id}" data-nav="${n.id}" title="${esc(n.label)}">${icon(n.icon)}<span>${esc(n.label)}</span>${n.count ? `<b class="count ${n.cls || ''}" data-count="${n.id}"></b>` : ''}</a>`
   ).join('');
 }
 
@@ -476,12 +482,13 @@ function sourceLabel(c) {
   return `Online${c.sourceName ? ' · ' + c.sourceName : ''}`;
 }
 
+// Clicking a row opens the details (which has Mark taken / Edit / Request).
+// Only the most common shortcut stays on the row: Request for others' parts, Restock for your empty ones.
 function rowActions(c) {
   const mine = c.ownerUid === myUid();
-  const a = [`<button class="btn sm ghost" data-action="details" data-id="${c.id}">Details</button>`];
+  const a = [];
   if (mine) {
-    if (c.qty > 0) a.push(`<button class="btn sm" data-action="take" data-id="${c.id}">Mark taken</button>`);
-    a.push(`<button class="btn sm" data-action="edit" data-id="${c.id}">${c.qty > 0 ? 'Edit' : 'Restock'}</button>`);
+    if (c.qty <= 0) a.push(`<button class="btn sm" data-action="edit" data-id="${c.id}">Restock</button>`);
   } else if (c.qty > 0) {
     a.push(`<button class="btn sm primary" data-action="request" data-id="${c.id}">Request</button>`);
   }
@@ -498,7 +505,7 @@ function componentTable(list, opt = {}) {
       <th class="num">Qty left</th>${showOwner ? '<th>Held by</th>' : ''}${showProject ? '<th>Project</th>' : ''}
       ${opt.date ? '<th>Added</th>' : ''}<th></th>
     </tr></thead>
-    <tbody>${shown.map(c => `<tr>
+    <tbody>${shown.map(c => `<tr class="clickable" data-action="details" data-id="${c.id}" title="Click for details${c.ownerUid === myUid() && c.qty > 0 ? ', Mark taken or Edit' : ''}">
       <td class="mono strong">${esc(c.partNumber)}</td>
       <td>${esc(c.value)}</td>
       <td><span class="pkg">${esc(c.package)}</span></td>
@@ -522,9 +529,10 @@ const SORTS = {
   owner: (a, b) => (a.ownerName || '').localeCompare(b.ownerName || ''),
 };
 
+const NO_CAT = '__none';
 const LIST_CFG = {
   search: {
-    key: 'search', outToggle: true, sort: 'pn',
+    key: 'search', outToggle: true, sort: 'pn', categories: true,
     predicate: () => () => true,
     placeholder: 'Search anything: part number, value (10k, 100nF), size (0603), description (buck, LDO)…',
   },
@@ -583,15 +591,45 @@ function renderList(el, cfg) {
     fill('f-cat', 'All categories', uniqSorted(base.map(c => c.category)), st.cat);
     fill('f-owner', 'All engineers', uniqSorted(base.map(c => c.ownerName)), st.owner);
     fill('f-proj', 'All projects', uniqSorted(base.map(c => c.project)), st.proj);
+    if (st.cat === NO_CAT && base.some(c => !c.category)) $('#f-cat', el).insertAdjacentHTML('beforeend', `<option value="${NO_CAT}" selected>Uncategorized</option>`);
+    const catOf = c => c.category || NO_CAT;
     let list = base.filter(c =>
-      (!st.pkg || c.package === st.pkg) && (!st.cat || c.category === st.cat) &&
+      (!st.pkg || c.package === st.pkg) && (!st.cat || catOf(c) === st.cat) &&
       (!st.owner || c.ownerName === st.owner) && (!st.proj || c.project === st.proj) && matchQuery(c, st.q));
     let hiddenOut = 0;
     if (cfg.outToggle && !st.out) { const before = list.length; list = list.filter(c => c.qty > 0); hiddenOut = before - list.length; }
     list.sort(SORTS[st.sort] || SORTS.pn);
     const pcs = list.reduce((s, c) => s + c.qty, 0);
-    $('#summary', el).innerHTML = `<b>${list.length}</b> item${list.length === 1 ? '' : 's'} · <b>${pcs.toLocaleString()}</b> pcs` +
-      (hiddenOut ? ` · <span class="muted">${hiddenOut} out-of-stock hidden (see <a href="#out">Out of Stock</a>)</span>` : '');
+    const outNote = hiddenOut ? ` · <span class="muted">${hiddenOut} out-of-stock hidden (see <a href="#out">Out of Stock</a>)</span>` : '';
+
+    // Search page with nothing typed or filtered: show categories instead of every component.
+    const browsing = cfg.categories && !st.q.trim() && !st.cat && !st.pkg && !st.owner && !st.proj && !st.showAll;
+    if (browsing) {
+      const cats = new Map();
+      for (const c of list) {
+        const k = catOf(c);
+        const g = cats.get(k) || { n: 0, pcs: 0, low: 0 };
+        g.n++; g.pcs += c.qty; if (isLow(c)) g.low++;
+        cats.set(k, g);
+      }
+      const keys = [...cats.keys()].sort((a, b) => (a === NO_CAT) - (b === NO_CAT) || a.localeCompare(b));
+      $('#summary', el).innerHTML = `<b>${keys.length}</b> categories · <b>${list.length}</b> items · <b>${pcs.toLocaleString()}</b> pcs${outNote}
+        · <button class="link" type="button" data-showall>Show all components</button>`;
+      $('#results', el).innerHTML = keys.length ? `<div class="cat-grid">${keys.map(k => {
+        const g = cats.get(k);
+        const name = k === NO_CAT ? 'Uncategorized' : k;
+        return `<button type="button" class="cat-tile" data-cat="${esc(k)}">
+          <span class="cat-badge">${esc(name.slice(0, 2))}</span>
+          <span class="cat-name">${esc(name)}</span>
+          <span class="cat-meta">${g.n} item${g.n === 1 ? '' : 's'} · ${g.pcs.toLocaleString()} pcs${g.low ? ` · <span class="text-warn">${g.low} low</span>` : ''}</span>
+        </button>`;
+      }).join('')}</div>` : `<div class="empty">No components yet.</div>`;
+      return;
+    }
+    const crumb = cfg.categories && (st.cat || st.showAll) && !st.q.trim()
+      ? `<button class="link" type="button" data-allcats>← All categories</button> · ` : '';
+    $('#summary', el).innerHTML = crumb + (st.cat ? `<b>${esc(st.cat === NO_CAT ? 'Uncategorized' : st.cat)}</b> · ` : '') +
+      `<b>${list.length}</b> item${list.length === 1 ? '' : 's'} · <b>${pcs.toLocaleString()}</b> pcs` + outNote;
     $('#results', el).innerHTML = componentTable(list, { date: cfg.date, empty: cfg.empty });
     if (cfg.feed) $('#feed', el).innerHTML = activityFeed();
   };
@@ -602,6 +640,15 @@ function renderList(el, cfg) {
     $('#' + id, el).addEventListener('change', e => { st[k] = e.target.value; update(); });
   $('#f-days', el)?.addEventListener('change', e => { st.days = Number(e.target.value); update(); });
   $('#f-out', el)?.addEventListener('change', e => { st.out = e.target.checked; update(); });
+  // (#view itself lives across pages, so listen on its fresh children, not on el)
+  const onNav = e => {
+    const tile = e.target.closest('[data-cat]');
+    if (tile) { st.cat = tile.dataset.cat; update(); window.scrollTo(0, 0); return; }
+    if (e.target.closest('[data-showall]')) { st.showAll = true; update(); return; }
+    if (e.target.closest('[data-allcats]')) { st.cat = ''; st.showAll = false; update(); }
+  };
+  $('#results', el).addEventListener('click', onNav);
+  $('#summary', el).addEventListener('click', onNav);
   update();
   if (cfg.key === 'search') q.focus();
   return update;
@@ -624,9 +671,14 @@ function activityFeed() {
 // ---------------------------------------------------------------------
 function renderMy(el) {
   const st = S.ui.my ||= { proj: '', q: '' };
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('riod.projCollapsed') === '1'; } catch { /* ignore */ }
   el.innerHTML = `
-    <div class="my-layout">
-      <aside class="card proj-list"><h4>My projects</h4><div id="projs"></div></aside>
+    <div class="my-layout ${collapsed ? 'proj-collapsed' : ''}">
+      <aside class="card proj-list">
+        <div class="proj-head"><h4>My projects</h4>
+          <button type="button" class="icon-btn proj-toggle" id="projToggle" title="Hide / show projects" aria-label="Hide or show projects">‹</button></div>
+        <div id="projs"></div></aside>
       <section>
         <div class="toolbar">
           <input id="q" class="search" type="search" autocomplete="off" placeholder="Search my components…" value="${esc(st.q)}">
@@ -664,6 +716,10 @@ function renderMy(el) {
     }).join('') || '<div class="empty">No matching components.</div>';
   };
 
+  $('#projToggle', el).addEventListener('click', () => {
+    const c = $('.my-layout', el).classList.toggle('proj-collapsed');
+    try { localStorage.setItem('riod.projCollapsed', c ? '1' : '0'); } catch { /* ignore */ }
+  });
   $('#projs', el).addEventListener('click', e => {
     const b = e.target.closest('[data-proj]');
     if (!b) return;
@@ -1418,8 +1474,8 @@ async function showDetails(c) {
   const mine = c.ownerUid === myUid();
   const actions = [];
   if (!mine && c.qty > 0) actions.push({ label: 'Request this part', cls: 'primary', onClick: () => { setTimeout(() => showRequestModal(c)); } });
-  if (mine && c.qty > 0) actions.push({ label: 'Mark taken', onClick: () => { setTimeout(() => showTakeModal(c)); } });
-  if (mine) actions.push({ label: 'Edit', onClick: () => { setTimeout(() => showEditModal(c)); } });
+  if (mine && c.qty > 0) actions.push({ label: 'Mark taken', cls: 'primary', onClick: () => { setTimeout(() => showTakeModal(c)); } });
+  if (mine) actions.push({ label: c.qty > 0 ? 'Edit' : 'Restock / Edit', onClick: () => { setTimeout(() => showEditModal(c)); } });
   actions.push({ label: 'Close', cls: 'ghost' });
   const m = openModal({
     title: c.partNumber, wide: true, actions,
